@@ -9,11 +9,13 @@ import {
   FileText,
   GripVertical,
   Loader2,
+  Lock,
   Pencil,
   Plus,
   Power,
   RefreshCw,
   Save,
+  ShieldAlert,
   Trash2,
   Upload,
   Video,
@@ -23,6 +25,9 @@ import type { ApiEnvelope, Course, CourseDay, CourseDayItem, CourseDownloadable,
 
 const API_BASE = (process.env.NEXT_PUBLIC_COURSES_API_BASE_URL || "https://api-dev.gratefulness.me").replace(/\/$/, "");
 const PROD_API_BASE = (process.env.NEXT_PUBLIC_COURSES_PROD_API_BASE_URL || "").replace(/\/$/, "");
+
+const REQUIRED_PASSWORD = "we_spread_gratitude";
+const SESSION_STORAGE_KEY = "gratitude_courses_unlocked";
 
 const emptyCourseForm = {
   order: 0,
@@ -326,6 +331,9 @@ export default function Home() {
 
 function CoursesAdmin() {
   const token = "";
+  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [passwordInput, setPasswordInput] = useState("");
+  const [passwordError, setPasswordError] = useState("");
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState("");
   const [course, setCourse] = useState<Course | null>(null);
@@ -350,12 +358,22 @@ function CoursesAdmin() {
   }, [course, itemForm.dayId]);
 
   useEffect(() => {
+    if (typeof window !== "undefined") {
+      const saved = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      if (saved === "true") {
+        setIsUnlocked(true);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
     if (!orderToast) return;
     const timeout = window.setTimeout(() => setOrderToast(null), 2200);
     return () => window.clearTimeout(timeout);
   }, [orderToast]);
 
   useEffect(() => {
+    if (!isUnlocked) return;
     let cancelled = false;
     setInitialLoading(true);
     setMessage("Loading courses");
@@ -378,7 +396,31 @@ function CoursesAdmin() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isUnlocked]);
+
+  function handleUnlock(event: FormEvent) {
+    event.preventDefault();
+    if (passwordInput === REQUIRED_PASSWORD) {
+      setIsUnlocked(true);
+      setPasswordError("");
+      setPasswordInput("");
+      if (typeof window !== "undefined") {
+        sessionStorage.setItem(SESSION_STORAGE_KEY, "true");
+      }
+    } else {
+      setPasswordError("Incorrect password. Please try again.");
+    }
+  }
+
+  function handleLock() {
+    setIsUnlocked(false);
+    setCourses([]);
+    setCourse(null);
+    setSelectedCourseId("");
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    }
+  }
 
   async function run(label: string, action: () => Promise<void>, successToast?: string) {
     setBusy(true);
@@ -999,7 +1041,12 @@ function CoursesAdmin() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <button onClick={() => run("Loading courses", loadCourses)} className="icon-button" title="Refresh courses"><RefreshCw size={17} /></button>
+            {isUnlocked && (
+              <>
+                <button onClick={() => run("Loading courses", loadCourses)} className="icon-button" title="Refresh courses"><RefreshCw size={17} /></button>
+                <button onClick={handleLock} className="secondary-button" title="Lock course operations"><Lock size={15} /> Lock</button>
+              </>
+            )}
             <span className="environment-badge">Dev</span>
           </div>
         </div>
@@ -1012,344 +1059,385 @@ function CoursesAdmin() {
         </div>
       )}
 
-      <div className="course-workspace">
-        <aside className="course-sidebar" aria-label="Courses">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="section-title">Courses</h2>
-            <div className="flex items-center gap-2">
-              <button type="button" onClick={startNewCourse} className="small-button"><Plus size={15} /> New course</button>
-              <button onClick={syncBunny} className="icon-button" title="Sync Bunny collections"><RefreshCw size={16} /></button>
+      {!isUnlocked ? (
+        <div className="flex min-h-[calc(100vh-64px)] items-center justify-center p-6 bg-[#f5f7f5]">
+          <div className="w-full max-w-md rounded-xl border border-[#dce5e0] bg-white p-8 shadow-xl">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-[#fde9ed] text-[#df5c79]">
+              <Lock size={28} />
             </div>
-          </div>
-          <div className="space-y-2">
-            {courses.map((item) => (
-              <button
-                key={item.courseId}
-                draggable={!busy}
-                onDragStart={(event) => setDragData(event, "course", item.courseId)}
-                onDragEnd={clearDragStyle}
-                onDragOver={(event) => event.preventDefault()}
-                onDrop={(event) => {
-                  event.preventDefault();
-                  const dragged = readDragData(event);
-                  if (dragged?.kind === "course") void reorderCourses(dragged.id, item.courseId);
-                }}
-                onClick={() => run("Loading course", () => loadCourse(item.courseId))}
-                className={`list-row text-left ${selectedCourseId === item.courseId ? "list-row-active" : ""}`}
-              >
-                <span className="flex items-center justify-between gap-2">
-                  <span className="flex min-w-0 items-center gap-1.5"><GripVertical size={14} className="shrink-0 text-[#9aa1ad]" /><span className="font-medium">{item.name}</span></span>
-                  <span className={`status-pill ${item.disabled ? "status-pill-disabled" : "status-pill-enabled"}`}>
-                    {item.disabled ? "Disabled" : "Enabled"}
-                  </span>
-                </span>
-                <span className="text-xs text-[#6b7280]">{item.dayCount} days</span>
-              </button>
-            ))}
-          </div>
-        </aside>
+            <h2 className="text-center text-xl font-bold text-[#27312d]">Security Gate</h2>
+            <p className="mt-1 text-center text-xs text-[#6b7280]">
+              Course operations are protected. Please enter the access password to continue.
+            </p>
 
-        <section className="course-content">
-          <div className="course-heading mb-4 flex items-center justify-between">
-            <div>
-              <h2 className="text-2xl font-semibold">{course?.name || "New course"}</h2>
-              <p className="text-sm text-[#6b7280]">{message}{busy ? "..." : ""}</p>
-            </div>
-            {(busy || initialLoading) && <Loader2 className="animate-spin text-[#e94b76]" />}
-          </div>
-
-          {course && <div className="course-metadata-bar">
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <button className="inline-flex items-center gap-2 text-left" onClick={editCourse}>
-                <BookOpen size={18} className="text-[#e94b76]" />
-                <span>
-                  <span className="block text-sm font-semibold">Course metadata</span>
-                </span>
-              </button>
-              <div className="flex flex-wrap items-center gap-2">
-                <button className="secondary-button" onClick={addIntroVideo}><Video size={15} /> Intro video</button>
-                <button className="secondary-button" onClick={editCourse}><Pencil size={15} /> Edit</button>
-                <button className="secondary-button" onClick={promoteCourse} disabled={busy || !PROD_API_BASE} title={!PROD_API_BASE ? "Configure NEXT_PUBLIC_COURSES_PROD_API_BASE_URL" : "Copy this course and its assets to production"}>
-                  <Upload size={15} /> Promote
-                </button>
-                <button className={course.disabled ? "primary-button" : "secondary-button"} onClick={toggleCourseDisabled} disabled={busy}>
-                  <Power size={15} /> {course.disabled ? "Enable" : "Disable"}
-                </button>
-              </div>
-            </div>
-          </div>}
-
-          {initialLoading && !course && (
-            <div className="panel grid min-h-40 place-items-center text-sm font-semibold text-[#6b7280]">
-              Loading course data...
-            </div>
-          )}
-
-          {!initialLoading && !course && !isCreatingCourse && (
-            <div className="panel grid min-h-40 place-items-center text-center">
+            <form onSubmit={handleUnlock} className="mt-6 space-y-4">
               <div>
-                <p className="text-sm font-semibold">No course selected</p>
-                <p className="mt-1 text-xs text-[#6b7280]">Refresh courses or choose one from the list.</p>
-              </div>
-            </div>
-          )}
-
-          {isCreatingCourse && (
-            <div className="panel grid min-h-40 place-items-center text-center">
-              <div>
-                <BookOpen className="mx-auto mb-3 text-[#e94b76]" size={24} />
-                <p className="text-sm font-semibold">Create a new course</p>
-                <p className="mt-1 max-w-sm text-xs text-[#6b7280]">Complete the course metadata in the editor. Saving creates its Bunny collection and DynamoDB record.</p>
-              </div>
-            </div>
-          )}
-
-          {course && (
-            <div className="course-sections">
-              <CourseSection
-                days={introVideoDays(course)}
-                downloadables={course.downloadables || []}
-                onEditDay={editDay}
-                onAddVideo={addVideoToDay}
-                onAddText={addTextToDay}
-                onAddDownloadable={addDownloadableToDay}
-                onEditItem={editItem}
-                onEditDownloadable={editDownloadable}
-                onDeleteItem={deleteItem}
-                onDeleteDownloadable={deleteDownloadable}
-                onDeleteDay={deleteDay}
-                onReorderItem={reorderItems}
-                introOnly
-              />
-              <CourseSection
-                days={course.days}
-                downloadables={course.downloadables || []}
-                onEditDay={editDay}
-                onAddVideo={addVideoToDay}
-                onAddText={addTextToDay}
-                onAddDownloadable={addDownloadableToDay}
-                onEditItem={editItem}
-                onEditDownloadable={editDownloadable}
-                onDeleteItem={deleteItem}
-                onDeleteDownloadable={deleteDownloadable}
-                onDeleteDay={deleteDay}
-                onAddDay={addDay}
-                onReorderDay={reorderDays}
-                onReorderItem={reorderItems}
-                onReorderDownloadable={reorderDownloadables}
-              />
-              <DownloadablesSection
-                downloadables={course.downloadables || []}
-                days={courseDays(course)}
-                onEdit={editDownloadable}
-                onDelete={deleteDownloadable}
-              />
-            </div>
-          )}
-        </section>
-
-        <aside className="course-editor" aria-label="Course editor">
-          <div className="editor-heading">
-            <h3 className="text-base font-semibold">Editor</h3>
-            <span className="editor-context">{isCreatingCourse ? "New course" : course?.name || "No course selected"}</span>
-          </div>
-
-          <label className="label mb-4">
-            Operation
-            <select className="field" value={editorMode} disabled={!course} onChange={(e) => setEditorMode(e.target.value as EditorMode)}>
-              <option value="course">Course metadata</option>
-              <option value="day">Day metadata</option>
-              <option value="video">Video item</option>
-              <option value="text">Text / prompt</option>
-              <option value="downloadable">Downloadable</option>
-            </select>
-          </label>
-
-          {editorMode === "course" && (
-            <form onSubmit={course ? saveCourse : createCourse} className="panel">
-              <div className="panel-heading"><BookOpen size={18} /> Course metadata</div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="label col-span-2">Name<input className="field" value={courseForm.name} onChange={(e) => setCourseForm({ ...courseForm, name: e.target.value })} /></label>
-                <label className="label col-span-2">Description<textarea className="field min-h-24" value={courseForm.description} onChange={(e) => setCourseForm({ ...courseForm, description: e.target.value })} /></label>
-                <label className="label">Author name<input className="field" value={courseForm.authorName} onChange={(e) => setCourseForm({ ...courseForm, authorName: e.target.value })} /></label>
-                <label className="label">Course order<input type="number" step="1" className="field" value={courseForm.order} onChange={(e) => setCourseForm({ ...courseForm, order: Number(e.target.value) })} /></label>
-                <label className="label">Thumbnail URL<input className="field" value={courseForm.thumbnailUrl} onChange={(e) => setCourseForm({ ...courseForm, thumbnailUrl: e.target.value })} /></label>
-                <label className="label col-span-2">
-                  Upload thumbnail
-                  <input
-                    type="file"
-                    accept="image/*"
-                    className="file-field"
-                    onChange={(event) => setThumbnailFile(event.target.files?.[0] || null)}
-                  />
-                  {thumbnailFile && <span className="mt-1 text-xs text-slate-500">Will upload compressed WebP: {thumbnailFile.name}</span>}
-                </label>
-                <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={courseForm.isPaid} onChange={(e) => setCourseForm({ ...courseForm, isPaid: e.target.checked })} /> Paid course</label>
-              </div>
-              <div className="mt-4 flex gap-2">
-                <button className="primary-button" disabled={busy || !courseForm.name.trim()}><Save size={16} /> {course ? "Save course" : "Create course"}</button>
-                {course && <button type="button" onClick={deleteCourse} className="danger-button"><Trash2 size={16} /> Delete</button>}
-              </div>
-            </form>
-          )}
-
-          {editorMode === "day" && (
-            <form onSubmit={saveDay} className="panel">
-              <div className="panel-heading"><Plus size={18} /> Day metadata</div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="label">Day ID<input className="field" value={dayForm.dayId} onChange={(e) => setDayForm({ ...dayForm, dayId: e.target.value })} /></label>
-                <label className="label">Day number<input type="number" className="field" value={dayForm.dayNumber} onChange={(e) => setDayForm({ ...dayForm, dayNumber: Number(e.target.value) })} /></label>
-                <label className="label col-span-2">Title<input className="field" value={dayForm.title} onChange={(e) => setDayForm({ ...dayForm, title: e.target.value })} /></label>
-                <label className="label col-span-2">Text content<textarea className="field min-h-32" value={dayForm.textContent} onChange={(e) => setDayForm({ ...dayForm, textContent: e.target.value })} /></label>
-              </div>
-              <button className="primary-button mt-4" disabled={!course || busy}><Save size={16} /> Save day</button>
-            </form>
-          )}
-
-          {editorMode === "video" && (
-            <form onSubmit={saveItem} className="panel">
-              <div className="panel-heading"><Video size={18} /> Video item</div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="label">Day ID<input className="field" value={itemForm.dayId} onChange={(e) => setItemForm({ ...itemForm, dayId: e.target.value })} /></label>
-                <label className="label">Order<input type="number" className="field" value={itemForm.order} onChange={(e) => setItemForm({ ...itemForm, order: Number(e.target.value) })} /></label>
-                <label className="label col-span-2">Title<input className="field" value={itemForm.title} onChange={(e) => setItemForm({ ...itemForm, title: e.target.value })} /></label>
-                <label className="label col-span-2">Item ID<input className="field" value={itemForm.itemId} onChange={(e) => setItemForm({ ...itemForm, itemId: e.target.value })} placeholder="Leave empty for auto item id" /></label>
-                <label className="label col-span-2">Video ID<input className="field" value={itemForm.videoId} onChange={(e) => setItemForm({ ...itemForm, videoId: e.target.value })} /></label>
-                <label className="label col-span-2">Upload video to Bunny<input type="file" accept="video/*" className="file-field" onChange={(e) => setVideoFile(e.target.files?.[0] || null)} /></label>
-                <label className="label">Duration seconds <span className="text-xs font-medium text-[#6b7280]">(auto from Bunny)</span><input type="number" className="field bg-[#f6f7f9] text-[#6b7280]" value={itemForm.durationSeconds} disabled readOnly /></label>
-                <label className="flex items-end gap-2 pb-2 text-sm"><input type="checkbox" checked={itemForm.requiredForCompletion} onChange={(e) => setItemForm({ ...itemForm, requiredForCompletion: e.target.checked })} /> Required</label>
-                <label className="label col-span-2">Description<textarea className="field min-h-24" value={itemForm.description} onChange={(e) => setItemForm({ ...itemForm, description: e.target.value })} /></label>
-              </div>
-              <button className="primary-button mt-4" disabled={!course || busy}><Upload size={16} /> Save video item</button>
-            </form>
-          )}
-
-          {editorMode === "text" && (
-            <form onSubmit={savePrompt} className="panel">
-              <div className="panel-heading"><FileText size={18} /> Text / prompt</div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="label">Day ID<input className="field" value={promptForm.dayId} onChange={(e) => setPromptForm({ ...promptForm, dayId: e.target.value })} /></label>
-                <label className="label">Order<input type="number" className="field" value={promptForm.order} onChange={(e) => setPromptForm({ ...promptForm, order: Number(e.target.value) })} /></label>
-                <label className="label col-span-2">Title<input className="field" value={promptForm.title} onChange={(e) => setPromptForm({ ...promptForm, title: e.target.value })} /></label>
-                <label className="label col-span-2">Markdown text<textarea className="field min-h-40" value={promptForm.textContent} onChange={(e) => setPromptForm({ ...promptForm, textContent: e.target.value })} /></label>
-              </div>
-              <button className="primary-button mt-4" disabled={!course || busy}><Save size={16} /> Save text</button>
-            </form>
-          )}
-
-          {editorMode === "downloadable" && (
-            <form onSubmit={saveDownloadable} className="panel">
-              <div className="panel-heading"><Download size={18} /> Reward</div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="label col-span-2">
-                  Unlock after
-                  <select
-                    className="field"
-                    value={downloadableForm.unlockAfter}
-                    onChange={(event) => {
-                      const unlockAfter = event.target.value;
-                      setDownloadableForm({
-                        ...downloadableForm,
-                        unlockAfter,
-                        order: downloadableForm.assetId
-                          ? downloadableForm.order
-                          : nextDownloadableOrder(course?.downloadables, unlockAfter),
-                      });
-                    }}
-                  >
-                    {downloadableDayOptions(course, downloadableForm.unlockAfter).map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <label className="label col-span-2">Title<input className="field" value={downloadableForm.title} onChange={(e) => setDownloadableForm({ ...downloadableForm, title: e.target.value })} /></label>
-                <label className="label">Type
-                  <select className="field" value={downloadableForm.type} onChange={(e) => setDownloadableForm({ ...downloadableForm, type: e.target.value })}>
-                    <option value="file">File</option>
-                    <option value="image">Image</option>
-                    <option value="pdf">PDF</option>
-                    <option value="zip">ZIP</option>
-                    <option value="spotify">Spotify Playlist</option>
-                    <option value="external_link">External Link</option>
-                    <option value="playlist">Playlist</option>
-                  </select>
-                </label>
-                <label className="label">Order<input type="number" min="1" className="field" value={downloadableForm.order} onChange={(e) => setDownloadableForm({ ...downloadableForm, order: Number(e.target.value) })} /></label>
-                <label className="label col-span-2">
-                  Upload file(s)
-                  <input
-                    type="file"
-                    multiple
-                    accept="image/*,application/pdf,.zip"
-                    className="file-field"
-                    onChange={(event) => {
-                      const files = Array.from(event.target.files || []);
-                      setDownloadableFiles(files);
-                      if (files.length > 1) {
-                        setDownloadableForm((current) => ({
-                          ...current,
-                          type: "playlist",
-                          title: current.title || "Reward playlist",
-                        }));
-                      } else if (files.length === 1 && downloadableForm.type === "playlist") {
-                        setDownloadableForm((current) => ({
-                          ...current,
-                          title: current.title || files[0].name,
-                        }));
-                      }
-                    }}
-                  />
-                </label>
-                {downloadableFiles.length > 0 && (
-                  <div className="col-span-2 rounded border border-[#e1e5ee] bg-[#f8fafc] p-3">
-                    <div className="mb-2 text-xs font-semibold text-[#4b5563]">
-                      {downloadableFiles.length > 1 ? `Playlist files (${downloadableFiles.length})` : "Selected file"}
-                    </div>
-                    <div className="space-y-1">
-                      {downloadableFiles.map((file, index) => (
-                        <div key={`${file.name}-${file.lastModified}`} className="flex items-center justify-between gap-3 text-xs text-[#6b7280]">
-                          <span className="truncate">{index + 1}. {file.name}</span>
-                          <span className="shrink-0 uppercase">{downloadableTypeForFile(file)}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
+                <label className="label mb-1.5 block">Access Password</label>
+                <input
+                  type="password"
+                  autoFocus
+                  className="field"
+                  placeholder="Enter password..."
+                  value={passwordInput}
+                  onChange={(e) => {
+                    setPasswordInput(e.target.value);
+                    if (passwordError) setPasswordError("");
+                  }}
+                />
+                {passwordError && (
+                  <p className="mt-2 flex items-center gap-1.5 text-xs font-semibold text-[#b83b59]">
+                    <ShieldAlert size={14} />
+                    {passwordError}
+                  </p>
                 )}
-                {downloadableForm.assetId && (findCourseDownloadable(course, downloadableForm.assetId)?.items?.length || 0) > 0 && (
-                  <div className="col-span-2 rounded border border-[#e1e5ee] bg-[#f8fafc] p-3">
-                    <div className="mb-2 text-xs font-semibold text-[#4b5563]">Playlist order</div>
-                    <div className="space-y-1">
-                      {[...(findCourseDownloadable(course, downloadableForm.assetId)?.items || [])]
-                        .sort((a, b) => a.order - b.order)
-                        .map((item) => (
-                          <div
-                            key={item.assetId}
-                            className="playlist-order-row"
-                            onDragOver={(event) => event.preventDefault()}
-                            onDrop={(event) => {
-                              const dragged = readDragData(event);
-                              if (dragged?.kind === "playlist-item" && dragged.parentId === downloadableForm.assetId) {
-                                event.preventDefault();
-                                void reorderDownloadableItems(downloadableForm.assetId, dragged.id, item.assetId);
-                              }
-                            }}
-                          >
-                            <span draggable onDragStart={(event) => setDragData(event, "playlist-item", item.assetId, downloadableForm.assetId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag playlist file"><GripVertical size={14} /></span>
-                            <span className="truncate text-xs text-[#4b5563]">{item.order}. {item.title}</span>
+              </div>
+
+              <button type="submit" className="primary-button w-full py-2.5 text-sm font-semibold">
+                Unlock Course Operations
+              </button>
+            </form>
+          </div>
+        </div>
+      ) : (
+        <div className="course-workspace">
+          <aside className="course-sidebar" aria-label="Courses">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="section-title">Courses</h2>
+              <div className="flex items-center gap-2">
+                <button type="button" onClick={startNewCourse} className="small-button"><Plus size={15} /> New course</button>
+                <button onClick={syncBunny} className="icon-button" title="Sync Bunny collections"><RefreshCw size={16} /></button>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {courses.map((item) => (
+                <button
+                  key={item.courseId}
+                  draggable={!busy}
+                  onDragStart={(event) => setDragData(event, "course", item.courseId)}
+                  onDragEnd={clearDragStyle}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    const dragged = readDragData(event);
+                    if (dragged?.kind === "course") void reorderCourses(dragged.id, item.courseId);
+                  }}
+                  onClick={() => run("Loading course", () => loadCourse(item.courseId))}
+                  className={`list-row text-left ${selectedCourseId === item.courseId ? "list-row-active" : ""}`}
+                >
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="flex min-w-0 items-center gap-1.5"><GripVertical size={14} className="shrink-0 text-[#9aa1ad]" /><span className="font-medium">{item.name}</span></span>
+                    <span className={`status-pill ${item.disabled ? "status-pill-disabled" : "status-pill-enabled"}`}>
+                      {item.disabled ? "Disabled" : "Enabled"}
+                    </span>
+                  </span>
+                  <span className="text-xs text-[#6b7280]">{item.dayCount} days</span>
+                </button>
+              ))}
+            </div>
+          </aside>
+
+          <section className="course-content">
+            <div className="course-heading mb-4 flex items-center justify-between">
+              <div>
+                <h2 className="text-2xl font-semibold">{course?.name || "New course"}</h2>
+                <p className="text-sm text-[#6b7280]">{message}{busy ? "..." : ""}</p>
+              </div>
+              {(busy || initialLoading) && <Loader2 className="animate-spin text-[#e94b76]" />}
+            </div>
+
+            {course && <div className="course-metadata-bar">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <button className="inline-flex items-center gap-2 text-left" onClick={editCourse}>
+                  <BookOpen size={18} className="text-[#e94b76]" />
+                  <span>
+                    <span className="block text-sm font-semibold">Course metadata</span>
+                  </span>
+                </button>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button className="secondary-button" onClick={addIntroVideo}><Video size={15} /> Intro video</button>
+                  <button className="secondary-button" onClick={editCourse}><Pencil size={15} /> Edit</button>
+                  <button className="secondary-button" onClick={promoteCourse} disabled={busy || !PROD_API_BASE} title={!PROD_API_BASE ? "Configure NEXT_PUBLIC_COURSES_PROD_API_BASE_URL" : "Copy this course and its assets to production"}>
+                    <Upload size={15} /> Promote
+                  </button>
+                  <button className={course.disabled ? "primary-button" : "secondary-button"} onClick={toggleCourseDisabled} disabled={busy}>
+                    <Power size={15} /> {course.disabled ? "Enable" : "Disable"}
+                  </button>
+                </div>
+              </div>
+            </div>}
+
+            {initialLoading && !course && (
+              <div className="panel grid min-h-40 place-items-center text-sm font-semibold text-[#6b7280]">
+                Loading course data...
+              </div>
+            )}
+
+            {!initialLoading && !course && !isCreatingCourse && (
+              <div className="panel grid min-h-40 place-items-center text-center">
+                <div>
+                  <p className="text-sm font-semibold">No course selected</p>
+                  <p className="mt-1 text-xs text-[#6b7280]">Refresh courses or choose one from the list.</p>
+                </div>
+              </div>
+            )}
+
+            {isCreatingCourse && (
+              <div className="panel grid min-h-40 place-items-center text-center">
+                <div>
+                  <BookOpen className="mx-auto mb-3 text-[#e94b76]" size={24} />
+                  <p className="text-sm font-semibold">Create a new course</p>
+                  <p className="mt-1 max-w-sm text-xs text-[#6b7280]">Complete the course metadata in the editor. Saving creates its Bunny collection and DynamoDB record.</p>
+                </div>
+              </div>
+            )}
+
+            {course && (
+              <div className="course-sections">
+                <CourseSection
+                  days={introVideoDays(course)}
+                  downloadables={course.downloadables || []}
+                  onEditDay={editDay}
+                  onAddVideo={addVideoToDay}
+                  onAddText={addTextToDay}
+                  onAddDownloadable={addDownloadableToDay}
+                  onEditItem={editItem}
+                  onEditDownloadable={editDownloadable}
+                  onDeleteItem={deleteItem}
+                  onDeleteDownloadable={deleteDownloadable}
+                  onDeleteDay={deleteDay}
+                  onReorderItem={reorderItems}
+                  introOnly
+                />
+                <CourseSection
+                  days={course.days}
+                  downloadables={course.downloadables || []}
+                  onEditDay={editDay}
+                  onAddVideo={addVideoToDay}
+                  onAddText={addTextToDay}
+                  onAddDownloadable={addDownloadableToDay}
+                  onEditItem={editItem}
+                  onEditDownloadable={editDownloadable}
+                  onDeleteItem={deleteItem}
+                  onDeleteDownloadable={deleteDownloadable}
+                  onDeleteDay={deleteDay}
+                  onAddDay={addDay}
+                  onReorderDay={reorderDays}
+                  onReorderItem={reorderItems}
+                  onReorderDownloadable={reorderDownloadables}
+                />
+                <DownloadablesSection
+                  downloadables={course.downloadables || []}
+                  days={courseDays(course)}
+                  onEdit={editDownloadable}
+                  onDelete={deleteDownloadable}
+                />
+              </div>
+            )}
+          </section>
+
+          <aside className="course-editor" aria-label="Course editor">
+            <div className="editor-heading">
+              <h3 className="text-base font-semibold">Editor</h3>
+              <span className="editor-context">{isCreatingCourse ? "New course" : course?.name || "No course selected"}</span>
+            </div>
+
+            <label className="label mb-4">
+              Operation
+              <select className="field" value={editorMode} disabled={!course} onChange={(e) => setEditorMode(e.target.value as EditorMode)}>
+                <option value="course">Course metadata</option>
+                <option value="day">Day metadata</option>
+                <option value="video">Video item</option>
+                <option value="text">Text / prompt</option>
+                <option value="downloadable">Downloadable</option>
+              </select>
+            </label>
+
+            {editorMode === "course" && (
+              <form onSubmit={course ? saveCourse : createCourse} className="panel">
+                <div className="panel-heading"><BookOpen size={18} /> Course metadata</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="label col-span-2">Name<input className="field" value={courseForm.name} onChange={(e) => setCourseForm({ ...courseForm, name: e.target.value })} /></label>
+                  <label className="label col-span-2">Description<textarea className="field min-h-24" value={courseForm.description} onChange={(e) => setCourseForm({ ...courseForm, description: e.target.value })} /></label>
+                  <label className="label">Author name<input className="field" value={courseForm.authorName} onChange={(e) => setCourseForm({ ...courseForm, authorName: e.target.value })} /></label>
+                  <label className="label">Course order<input type="number" step="1" className="field" value={courseForm.order} onChange={(e) => setCourseForm({ ...courseForm, order: Number(e.target.value) })} /></label>
+                  <label className="label">Thumbnail URL<input className="field" value={courseForm.thumbnailUrl} onChange={(e) => setCourseForm({ ...courseForm, thumbnailUrl: e.target.value })} /></label>
+                  <label className="label col-span-2">
+                    Upload thumbnail
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="file-field"
+                      onChange={(event) => setThumbnailFile(event.target.files?.[0] || null)}
+                    />
+                    {thumbnailFile && <span className="mt-1 text-xs text-slate-500">Will upload compressed WebP: {thumbnailFile.name}</span>}
+                  </label>
+                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={courseForm.isPaid} onChange={(e) => setCourseForm({ ...courseForm, isPaid: e.target.checked })} /> Paid course</label>
+                </div>
+                <div className="mt-4 flex gap-2">
+                  <button className="primary-button" disabled={busy || !courseForm.name.trim()}><Save size={16} /> {course ? "Save course" : "Create course"}</button>
+                  {course && <button type="button" onClick={deleteCourse} className="danger-button"><Trash2 size={16} /> Delete</button>}
+                </div>
+              </form>
+            )}
+
+            {editorMode === "day" && (
+              <form onSubmit={saveDay} className="panel">
+                <div className="panel-heading"><Plus size={18} /> Day metadata</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="label">Day ID<input className="field" value={dayForm.dayId} onChange={(e) => setDayForm({ ...dayForm, dayId: e.target.value })} /></label>
+                  <label className="label">Day number<input type="number" className="field" value={dayForm.dayNumber} onChange={(e) => setDayForm({ ...dayForm, dayNumber: Number(e.target.value) })} /></label>
+                  <label className="label col-span-2">Title<input className="field" value={dayForm.title} onChange={(e) => setDayForm({ ...dayForm, title: e.target.value })} /></label>
+                  <label className="label col-span-2">Text content<textarea className="field min-h-32" value={dayForm.textContent} onChange={(e) => setDayForm({ ...dayForm, textContent: e.target.value })} /></label>
+                </div>
+                <button className="primary-button mt-4" disabled={!course || busy}><Save size={16} /> Save day</button>
+              </form>
+            )}
+
+            {editorMode === "video" && (
+              <form onSubmit={saveItem} className="panel">
+                <div className="panel-heading"><Video size={18} /> Video item</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="label">Day ID<input className="field" value={itemForm.dayId} onChange={(e) => setItemForm({ ...itemForm, dayId: e.target.value })} /></label>
+                  <label className="label">Order<input type="number" className="field" value={itemForm.order} onChange={(e) => setItemForm({ ...itemForm, order: Number(e.target.value) })} /></label>
+                  <label className="label col-span-2">Title<input className="field" value={itemForm.title} onChange={(e) => setItemForm({ ...itemForm, title: e.target.value })} /></label>
+                  <label className="label col-span-2">Item ID<input className="field" value={itemForm.itemId} onChange={(e) => setItemForm({ ...itemForm, itemId: e.target.value })} placeholder="Leave empty for auto item id" /></label>
+                  <label className="label col-span-2">Video ID<input className="field" value={itemForm.videoId} onChange={(e) => setItemForm({ ...itemForm, videoId: e.target.value })} /></label>
+                  <label className="label col-span-2">Upload video to Bunny<input type="file" accept="video/*" className="file-field" onChange={(e) => setVideoFile(e.target.files?.[0] || null)} /></label>
+                  <label className="label">Duration seconds <span className="text-xs font-medium text-[#6b7280]">(auto from Bunny)</span><input type="number" className="field bg-[#f6f7f9] text-[#6b7280]" value={itemForm.durationSeconds} disabled readOnly /></label>
+                  <label className="flex items-end gap-2 pb-2 text-sm"><input type="checkbox" checked={itemForm.requiredForCompletion} onChange={(e) => setItemForm({ ...itemForm, requiredForCompletion: e.target.checked })} /> Required</label>
+                  <label className="label col-span-2">Description<textarea className="field min-h-24" value={itemForm.description} onChange={(e) => setItemForm({ ...itemForm, description: e.target.value })} /></label>
+                </div>
+                <button className="primary-button mt-4" disabled={!course || busy}><Upload size={16} /> Save video item</button>
+              </form>
+            )}
+
+            {editorMode === "text" && (
+              <form onSubmit={savePrompt} className="panel">
+                <div className="panel-heading"><FileText size={18} /> Text / prompt</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="label">Day ID<input className="field" value={promptForm.dayId} onChange={(e) => setPromptForm({ ...promptForm, dayId: e.target.value })} /></label>
+                  <label className="label">Order<input type="number" className="field" value={promptForm.order} onChange={(e) => setPromptForm({ ...promptForm, order: Number(e.target.value) })} /></label>
+                  <label className="label col-span-2">Title<input className="field" value={promptForm.title} onChange={(e) => setPromptForm({ ...promptForm, title: e.target.value })} /></label>
+                  <label className="label col-span-2">Markdown text<textarea className="field min-h-40" value={promptForm.textContent} onChange={(e) => setPromptForm({ ...promptForm, textContent: e.target.value })} /></label>
+                </div>
+                <button className="primary-button mt-4" disabled={!course || busy}><Save size={16} /> Save text</button>
+              </form>
+            )}
+
+            {editorMode === "downloadable" && (
+              <form onSubmit={saveDownloadable} className="panel">
+                <div className="panel-heading"><Download size={18} /> Reward</div>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="label col-span-2">
+                    Unlock after
+                    <select
+                      className="field"
+                      value={downloadableForm.unlockAfter}
+                      onChange={(event) => {
+                        const unlockAfter = event.target.value;
+                        setDownloadableForm({
+                          ...downloadableForm,
+                          unlockAfter,
+                          order: downloadableForm.assetId
+                            ? downloadableForm.order
+                            : nextDownloadableOrder(course?.downloadables, unlockAfter),
+                        });
+                      }}
+                    >
+                      {downloadableDayOptions(course, downloadableForm.unlockAfter).map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="label col-span-2">Title<input className="field" value={downloadableForm.title} onChange={(e) => setDownloadableForm({ ...downloadableForm, title: e.target.value })} /></label>
+                  <label className="label">Type
+                    <select className="field" value={downloadableForm.type} onChange={(e) => setDownloadableForm({ ...downloadableForm, type: e.target.value })}>
+                      <option value="file">File</option>
+                      <option value="image">Image</option>
+                      <option value="pdf">PDF</option>
+                      <option value="zip">ZIP</option>
+                      <option value="spotify">Spotify Playlist</option>
+                      <option value="external_link">External Link</option>
+                      <option value="playlist">Playlist</option>
+                    </select>
+                  </label>
+                  <label className="label">Order<input type="number" min="1" className="field" value={downloadableForm.order} onChange={(e) => setDownloadableForm({ ...downloadableForm, order: Number(e.target.value) })} /></label>
+                  <label className="label col-span-2">
+                    Upload file(s)
+                    <input
+                      type="file"
+                      multiple
+                      accept="image/*,application/pdf,.zip"
+                      className="file-field"
+                      onChange={(event) => {
+                        const files = Array.from(event.target.files || []);
+                        setDownloadableFiles(files);
+                        if (files.length > 1) {
+                          setDownloadableForm((current) => ({
+                            ...current,
+                            type: "playlist",
+                            title: current.title || "Reward playlist",
+                          }));
+                        } else if (files.length === 1 && downloadableForm.type === "playlist") {
+                          setDownloadableForm((current) => ({
+                            ...current,
+                            title: current.title || files[0].name,
+                          }));
+                        }
+                      }}
+                    />
+                  </label>
+                  {downloadableFiles.length > 0 && (
+                    <div className="col-span-2 rounded border border-[#e1e5ee] bg-[#f8fafc] p-3">
+                      <div className="mb-2 text-xs font-semibold text-[#4b5563]">
+                        {downloadableFiles.length > 1 ? `Playlist files (${downloadableFiles.length})` : "Selected file"}
+                      </div>
+                      <div className="space-y-1">
+                        {downloadableFiles.map((file, index) => (
+                          <div key={`${file.name}-${file.lastModified}`} className="flex items-center justify-between gap-3 text-xs text-[#6b7280]">
+                            <span className="truncate">{index + 1}. {file.name}</span>
+                            <span className="shrink-0 uppercase">{downloadableTypeForFile(file)}</span>
                           </div>
                         ))}
+                      </div>
                     </div>
-                  </div>
-                )}
-                <label className="label col-span-2">Existing URL<input className="field" value={downloadableForm.url} onChange={(e) => setDownloadableForm({ ...downloadableForm, url: e.target.value })} placeholder="Filled automatically after upload" /></label>
-              </div>
-              <button className="primary-button mt-4" disabled={!course || busy}><Upload size={16} /> Save reward</button>
-            </form>
-          )}
+                  )}
+                  {downloadableForm.assetId && (findCourseDownloadable(course, downloadableForm.assetId)?.items?.length || 0) > 0 && (
+                    <div className="col-span-2 rounded border border-[#e1e5ee] bg-[#f8fafc] p-3">
+                      <div className="mb-2 text-xs font-semibold text-[#4b5563]">Playlist order</div>
+                      <div className="space-y-1">
+                        {[...(findCourseDownloadable(course, downloadableForm.assetId)?.items || [])]
+                          .sort((a, b) => a.order - b.order)
+                          .map((item) => (
+                            <div
+                              key={item.assetId}
+                              className="playlist-order-row"
+                              onDragOver={(event) => event.preventDefault()}
+                              onDrop={(event) => {
+                                const dragged = readDragData(event);
+                                if (dragged?.kind === "playlist-item" && dragged.parentId === downloadableForm.assetId) {
+                                  event.preventDefault();
+                                  void reorderDownloadableItems(downloadableForm.assetId, dragged.id, item.assetId);
+                                }
+                              }}
+                            >
+                              <span draggable onDragStart={(event) => setDragData(event, "playlist-item", item.assetId, downloadableForm.assetId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag playlist file"><GripVertical size={14} /></span>
+                              <span className="truncate text-xs text-[#4b5563]">{item.order}. {item.title}</span>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+                  )}
+                  <label className="label col-span-2">Existing URL<input className="field" value={downloadableForm.url} onChange={(e) => setDownloadableForm({ ...downloadableForm, url: e.target.value })} placeholder="Filled automatically after upload" /></label>
+                </div>
+                <button className="primary-button mt-4" disabled={!course || busy}><Upload size={16} /> Save reward</button>
+              </form>
+            )}
 
-          {selectedDay && <p className="mt-4 text-xs text-[#6b7280]">Selected day: {selectedDay.title}</p>}
-        </aside>
-      </div>
+            {selectedDay && <p className="mt-4 text-xs text-[#6b7280]">Selected day: {selectedDay.title}</p>}
+          </aside>
+        </div>
+      )}
     </main>
   );
 }
