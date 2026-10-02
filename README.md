@@ -12,7 +12,7 @@ Internal course operations tool for the Gratitude backend.
 ## Access model
 
 - The web tool has no sign-in screen.
-- Backend requests can still use the existing bearer-token field when an endpoint requires it.
+- The web tool calls the course-management endpoints without an authentication token.
 
 ## Setup
 

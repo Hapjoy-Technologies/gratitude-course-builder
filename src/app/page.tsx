@@ -325,9 +325,7 @@ export default function Home() {
 }
 
 function CoursesAdmin() {
-  const [token, setToken] = useState(() =>
-    typeof window === "undefined" ? "" : localStorage.getItem("coursesAdminToken") || "",
-  );
+  const token = "";
   const [courses, setCourses] = useState<CourseSummary[]>([]);
   const [selectedCourseId, setSelectedCourseId] = useState("");
   const [course, setCourse] = useState<Course | null>(null);
@@ -350,10 +348,6 @@ function CoursesAdmin() {
     if (!course) return null;
     return findCourseDay(course, itemForm.dayId) || courseDays(course)[0] || null;
   }, [course, itemForm.dayId]);
-
-  useEffect(() => {
-    localStorage.setItem("coursesAdminToken", token);
-  }, [token]);
 
   useEffect(() => {
     if (!orderToast) return;
@@ -384,7 +378,7 @@ function CoursesAdmin() {
     return () => {
       cancelled = true;
     };
-  }, [token]);
+  }, []);
 
   async function run(label: string, action: () => Promise<void>, successToast?: string) {
     setBusy(true);
@@ -1020,12 +1014,6 @@ function CoursesAdmin() {
 
       <div className="course-workspace">
         <aside className="course-sidebar" aria-label="Courses">
-          <details className="connection-settings">
-            <summary>Backend authentication</summary>
-            <label className="label mt-3">Admin bearer token
-              <textarea value={token} onChange={(e) => setToken(e.target.value)} className="field min-h-20 font-mono text-xs" placeholder="Paste Firebase/admin bearer token" />
-            </label>
-          </details>
           <div className="mb-3 flex items-center justify-between">
             <h2 className="section-title">Courses</h2>
             <div className="flex items-center gap-2">
