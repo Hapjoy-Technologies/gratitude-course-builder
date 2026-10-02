@@ -1,14 +1,17 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import {
   BookOpen,
+  CheckCircle2,
   ChevronDown,
   Download,
   FileText,
+  GripVertical,
   Loader2,
   Pencil,
   Plus,
+  Power,
   RefreshCw,
   Save,
   ShieldCheck,
@@ -17,16 +20,20 @@ import {
   Video,
 } from "lucide-react";
 import { SignInButton, UserButton, useUser } from "@clerk/nextjs";
+import { Upload as TusUpload } from "tus-js-client";
 import type { ApiEnvelope, Course, CourseDay, CourseDayItem, CourseDownloadable, CourseDownloadableItem, CourseSummary } from "@/lib/types";
 
 const API_BASE = (process.env.NEXT_PUBLIC_COURSES_API_BASE_URL || "https://api-dev.gratefulness.me").replace(/\/$/, "");
+const PROD_API_BASE = (process.env.NEXT_PUBLIC_COURSES_PROD_API_BASE_URL || "").replace(/\/$/, "");
 const ADMIN_DOMAIN = process.env.NEXT_PUBLIC_ADMIN_EMAIL_DOMAIN || "gratefulness.me";
 const CLERK_READY = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
 
 const emptyCourseForm = {
+  order: 0,
   name: "",
   description: "",
   authorId: "gratitude",
+  authorName: "Gratitude",
   isPaid: false,
   thumbnailUrl: "",
 };
@@ -81,6 +88,34 @@ type DownloadableUploadResponse = {
   downloadable: CourseDownloadable;
 };
 
+type ThumbnailUploadResponse = {
+  uploadUrl: string;
+  thumbnailUrl: string;
+  method: string;
+  headers?: Record<string, string>;
+  expiresIn: number;
+};
+
+type VideoUploadResponse = {
+  videoId: string;
+  title: string;
+  uploadUrl: string;
+  method: "TUS";
+  headers: Record<string, string>;
+  expiresIn: number;
+};
+
+async function putFileDirectly(file: File, upload: { uploadUrl: string; method?: string; headers?: Record<string, string> }) {
+  const response = await fetch(upload.uploadUrl, {
+    method: upload.method || "PUT",
+    headers: upload.headers || { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  if (!response.ok) {
+    throw new Error(`Direct file upload failed with HTTP ${response.status}`);
+  }
+}
+
 async function apiRequest<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -98,6 +133,37 @@ async function apiRequest<T>(path: string, token: string, init: RequestInit = {}
   return (payload.data ?? payload) as T;
 }
 
+async function productionApiRequest<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
+  if (!PROD_API_BASE) throw new Error("Production API URL is not configured");
+  const response = await fetch(`${PROD_API_BASE}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init.headers || {}),
+    },
+  });
+  const payload = (await response.json().catch(() => ({}))) as ApiEnvelope<T>;
+  if (!response.ok || payload.success === false) {
+    const err = typeof payload.error === "string" ? payload.error : payload.error?.message;
+    throw new Error(err || `Production request failed with HTTP ${response.status}`);
+  }
+  return (payload.data ?? payload) as T;
+}
+
+type CoursePromotionReport = {
+  courseId: string;
+  courseName: string;
+  mode: "dry-run" | "apply";
+  sourceTable: string;
+  targetTable: string;
+  sourceBucket: string;
+  targetBucket: string;
+  objects: string[];
+  objectsCopied: number;
+  productionSaved: boolean;
+};
+
 function secondsToLabel(seconds?: number) {
   if (!seconds) return "-";
   const minutes = Math.floor(seconds / 60);
@@ -107,6 +173,36 @@ function secondsToLabel(seconds?: number) {
 
 function sortItems(items: CourseDayItem[]) {
   return [...items].sort((a, b) => a.order - b.order || a.itemId.localeCompare(b.itemId));
+}
+
+function moveById<T>(items: T[], sourceId: string, targetId: string, getId: (item: T) => string) {
+  const sourceIndex = items.findIndex((item) => getId(item) === sourceId);
+  const targetIndex = items.findIndex((item) => getId(item) === targetId);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return items;
+  const next = [...items];
+  const [moved] = next.splice(sourceIndex, 1);
+  next.splice(targetIndex, 0, moved);
+  return next;
+}
+
+function setDragData(event: DragEvent, kind: string, id: string, parentId = "") {
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("application/x-course-order", JSON.stringify({ kind, id, parentId }));
+  const dragSurface = (event.currentTarget as HTMLElement).closest<HTMLElement>(".list-row, .tree-summary, .tree-item, .playlist-order-row");
+  dragSurface?.classList.add("is-dragging");
+}
+
+function clearDragStyle(event: DragEvent) {
+  const dragSurface = (event.currentTarget as HTMLElement).closest<HTMLElement>(".list-row, .tree-summary, .tree-item, .playlist-order-row");
+  dragSurface?.classList.remove("is-dragging");
+}
+
+function readDragData(event: DragEvent) {
+  try {
+    return JSON.parse(event.dataTransfer.getData("application/x-course-order")) as { kind: string; id: string; parentId: string };
+  } catch {
+    return null;
+  }
 }
 
 function nextItemOrder(items: CourseDayItem[] = []) {
@@ -165,8 +261,52 @@ function downloadableTypeForFile(file: File) {
   return "file";
 }
 
+async function compressThumbnail(file: File) {
+  if (!file.type.startsWith("image/")) {
+    throw new Error("Thumbnail must be an image");
+  }
+
+  const image = await createImageBitmap(file);
+  const maxSize = 1200;
+  const scale = Math.min(1, maxSize / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) {
+    throw new Error("Could not prepare thumbnail image");
+  }
+  context.drawImage(image, 0, 0, width, height);
+
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/webp", 0.82));
+  if (!blob) {
+    throw new Error("Could not compress thumbnail image");
+  }
+  return new File([blob], `thumbnail-${Date.now()}.webp`, { type: "image/webp" });
+}
+
 function courseDays(course: Course | null) {
   return [...(course?.introVideos || []), ...(course?.days || [])];
+}
+
+function defaultIntroDay(course: Course): CourseDay {
+  return {
+    courseId: course.courseId,
+    dayId: "intro-1",
+    dayNumber: 0,
+    title: "Introduction",
+    description: "",
+    thumbnailUrl: course.thumbnailUrl || "",
+    textContent: "",
+    contentFormat: "markdown",
+    items: [],
+  };
+}
+
+function introVideoDays(course: Course) {
+  return course.introVideos?.length ? course.introVideos : [defaultIntroDay(course)];
 }
 
 function findCourseDay(course: Course | null, dayId: string) {
@@ -265,12 +405,15 @@ function CoursesAdmin({ email }: { email: string }) {
   const [itemForm, setItemForm] = useState(emptyItemForm);
   const [promptForm, setPromptForm] = useState(emptyPromptForm);
   const [downloadableForm, setDownloadableForm] = useState(emptyDownloadableForm);
+  const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [downloadableFiles, setDownloadableFiles] = useState<File[]>([]);
   const [editorMode, setEditorMode] = useState<EditorMode>("course");
+  const [isCreatingCourse, setIsCreatingCourse] = useState(false);
   const [busy, setBusy] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [message, setMessage] = useState("Ready");
+  const [orderToast, setOrderToast] = useState<{ id: number; text: string } | null>(null);
 
   const selectedDay = useMemo(() => {
     if (!course) return null;
@@ -282,10 +425,16 @@ function CoursesAdmin({ email }: { email: string }) {
   }, [token]);
 
   useEffect(() => {
+    if (!orderToast) return;
+    const timeout = window.setTimeout(() => setOrderToast(null), 2200);
+    return () => window.clearTimeout(timeout);
+  }, [orderToast]);
+
+  useEffect(() => {
     let cancelled = false;
     setInitialLoading(true);
     setMessage("Loading courses");
-    apiRequest<{ courses: CourseSummary[] }>("/v1/courses", token)
+    apiRequest<{ courses: CourseSummary[] }>("/v1/courses/admin", token)
       .then((data) => {
         if (cancelled) return;
         const nextCourses = data.courses || [];
@@ -306,12 +455,13 @@ function CoursesAdmin({ email }: { email: string }) {
     };
   }, [token]);
 
-  async function run(label: string, action: () => Promise<void>) {
+  async function run(label: string, action: () => Promise<void>, successToast?: string) {
     setBusy(true);
     setMessage(label);
     try {
       await action();
       setMessage(`${label} done`);
+      if (successToast) setOrderToast({ id: Date.now(), text: successToast });
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Something failed");
     } finally {
@@ -320,22 +470,25 @@ function CoursesAdmin({ email }: { email: string }) {
   }
 
   async function loadCourses() {
-    const data = await apiRequest<{ courses: CourseSummary[] }>("/v1/courses", token);
+    const data = await apiRequest<{ courses: CourseSummary[] }>("/v1/courses/admin", token);
     const nextCourses = data.courses || [];
     setCourses(nextCourses);
-    if (!course && nextCourses[0]) {
+    if (!course && !isCreatingCourse && nextCourses[0]) {
       await loadCourse(nextCourses[0].courseId);
     }
   }
 
   async function loadCourse(courseId: string) {
+    setIsCreatingCourse(false);
     setSelectedCourseId(courseId);
     const data = await apiRequest<{ course: Course }>(`/v1/courses/${courseId}/admin`, token);
     setCourse(data.course);
     setCourseForm({
+      order: data.course.order ?? 0,
       name: data.course.name || "",
       description: data.course.description || "",
       authorId: data.course.authorId || "gratitude",
+      authorName: data.course.authorName || data.course.authorId || "Gratitude",
       isPaid: data.course.isPaid || false,
       thumbnailUrl: data.course.thumbnailUrl || "",
     });
@@ -366,6 +519,22 @@ function CoursesAdmin({ email }: { email: string }) {
     setEditorMode("course");
   }
 
+  function startNewCourse() {
+    setIsCreatingCourse(true);
+    setSelectedCourseId("");
+    setCourse(null);
+    setCourseForm({ ...emptyCourseForm });
+    setDayForm({ ...emptyDayForm });
+    setItemForm({ ...emptyItemForm });
+    setPromptForm({ ...emptyPromptForm });
+    setDownloadableForm({ ...emptyDownloadableForm });
+    setThumbnailFile(null);
+    setVideoFile(null);
+    setDownloadableFiles([]);
+    setEditorMode("course");
+    setMessage("Enter the new course details");
+  }
+
   function editDay(day: CourseDay) {
     setDayForm({
       dayId: day.dayId,
@@ -389,6 +558,117 @@ function CoursesAdmin({ email }: { email: string }) {
     });
     setVideoFile(null);
     setEditorMode("video");
+  }
+
+  function addIntroVideo() {
+    if (!course) return;
+    const introDay = course.introVideos?.[0] || defaultIntroDay(course);
+    addVideoToDay(introDay);
+  }
+
+  function addDay() {
+    if (!course) return;
+    const dayNumber = Math.max(0, ...course.days.map((day) => day.dayNumber)) + 1;
+    setDayForm({
+      ...emptyDayForm,
+      dayId: `day-${dayNumber}`,
+      dayNumber,
+      title: `Day ${dayNumber}`,
+    });
+    setEditorMode("day");
+  }
+
+  async function reorderCourses(sourceId: string, targetId: string) {
+    const next = moveById(courses, sourceId, targetId, (item) => item.courseId)
+      .map((item, index) => ({ ...item, order: index + 1 }));
+    if (next === courses) return;
+    setCourses(next);
+    await run("Saving course order", async () => {
+      try {
+        await apiRequest("/v1/courses/order", token, {
+          method: "PUT",
+          body: JSON.stringify({ courses: next.map((item) => ({ courseId: item.courseId, order: item.order })) }),
+        });
+      } finally {
+        await loadCourses();
+      }
+    }, "Course order updated");
+  }
+
+  async function reorderDays(sourceId: string, targetId: string) {
+    if (!course) return;
+    const ordered = [...course.days].sort((a, b) => a.dayNumber - b.dayNumber || a.dayId.localeCompare(b.dayId));
+    const nextDays = moveById(ordered, sourceId, targetId, (day) => day.dayId)
+      .map((day, index) => ({ ...day, dayNumber: index + 1 }));
+    setCourse({ ...course, days: nextDays });
+    await run("Saving day order", async () => {
+      try {
+        await apiRequest(`/v1/courses/${course.courseId}/order`, token, {
+          method: "PUT",
+          body: JSON.stringify({ days: nextDays.map((day) => ({ dayId: day.dayId, dayNumber: day.dayNumber })) }),
+        });
+      } finally {
+        await loadCourse(course.courseId);
+      }
+    }, "Day order updated");
+  }
+
+  async function reorderItems(dayId: string, sourceId: string, targetId: string) {
+    if (!course) return;
+    const day = findCourseDay(course, dayId);
+    if (!day) return;
+    const nextItems = moveById(sortItems(day.items), sourceId, targetId, (item) => item.itemId)
+      .map((item, index) => ({ ...item, order: index + 1 }));
+    const replaceDay = (candidate: CourseDay) => candidate.dayId === dayId ? { ...candidate, items: nextItems } : candidate;
+    setCourse({ ...course, days: course.days.map(replaceDay), introVideos: course.introVideos?.map(replaceDay) });
+    await run("Saving content order", async () => {
+      try {
+        await apiRequest(`/v1/courses/${course.courseId}/order`, token, {
+          method: "PUT",
+          body: JSON.stringify({ items: nextItems.map((item) => ({ dayId, itemId: item.itemId, order: item.order })) }),
+        });
+      } finally {
+        await loadCourse(course.courseId);
+      }
+    }, "Content order updated");
+  }
+
+  async function reorderDownloadables(dayId: string, sourceId: string, targetId: string) {
+    if (!course) return;
+    const group = downloadablesForDay(course.downloadables, dayId);
+    const moved = moveById(group, sourceId, targetId, (item) => item.assetId)
+      .map((item, index) => ({ ...item, order: index + 1 }));
+    const byId = new Map(moved.map((item) => [item.assetId, item]));
+    setCourse({ ...course, downloadables: (course.downloadables || []).map((item) => byId.get(item.assetId) || item) });
+    await run("Saving reward order", async () => {
+      try {
+        await apiRequest(`/v1/courses/${course.courseId}/order`, token, {
+          method: "PUT",
+          body: JSON.stringify({ downloadables: moved.map((item) => ({ assetId: item.assetId, order: item.order })) }),
+        });
+      } finally {
+        await loadCourse(course.courseId);
+      }
+    }, "Reward order updated");
+  }
+
+  async function reorderDownloadableItems(parentAssetId: string, sourceId: string, targetId: string) {
+    if (!course) return;
+    const parent = findCourseDownloadable(course, parentAssetId);
+    if (!parent?.items) return;
+    const nextItems = moveById([...parent.items].sort((a, b) => a.order - b.order), sourceId, targetId, (item) => item.assetId)
+      .map((item, index) => ({ ...item, order: index + 1 }));
+    setCourse({ ...course, downloadables: (course.downloadables || []).map((item) => item.assetId === parentAssetId ? { ...item, items: nextItems } : item) });
+    await run("Saving playlist order", async () => {
+      try {
+        await apiRequest(`/v1/courses/${course.courseId}/order`, token, {
+          method: "PUT",
+          body: JSON.stringify({ downloadableItems: nextItems.map((item) => ({ parentAssetId, assetId: item.assetId, order: item.order })) }),
+        });
+      } finally {
+        await loadCourse(course.courseId);
+      }
+    }, "Playlist order updated");
   }
 
   function editItem(day: CourseDay, item: CourseDayItem) {
@@ -461,26 +741,50 @@ function CoursesAdmin({ email }: { email: string }) {
         method: "POST",
         body: JSON.stringify(courseForm),
       });
-      await loadCourses();
+      if (thumbnailFile) {
+        const thumbnailUpload = await uploadThumbnailFile(thumbnailFile, data.course.courseId);
+        await apiRequest(`/v1/courses/${data.course.courseId}`, token, {
+          method: "PUT",
+          body: JSON.stringify({ thumbnailUrl: thumbnailUpload.thumbnailUrl }),
+        });
+      }
+      setThumbnailFile(null);
+      const coursesData = await apiRequest<{ courses: CourseSummary[] }>("/v1/courses/admin", token);
+      setCourses(coursesData.courses || []);
       await loadCourse(data.course.courseId);
     });
+  }
+
+  async function uploadThumbnailFile(file: File, courseId = course?.courseId) {
+    if (!courseId) throw new Error("Choose a course first");
+    const compressed = await compressThumbnail(file);
+    const upload = await apiRequest<ThumbnailUploadResponse>(`/v1/courses/${courseId}/thumbnail/upload`, token, {
+      method: "POST",
+      body: JSON.stringify({ fileName: compressed.name, contentType: compressed.type }),
+    });
+    await putFileDirectly(compressed, upload);
+    return upload;
   }
 
   async function saveCourse(event: FormEvent) {
     event.preventDefault();
     if (!course) return;
     await run("Saving course", async () => {
+      const thumbnailUpload = thumbnailFile ? await uploadThumbnailFile(thumbnailFile) : null;
       const nextCourse = {
         name: courseForm.name.trim() || course.name,
         description: courseForm.description.trim() || course.description || "",
         authorId: courseForm.authorId.trim() || course.authorId || "gratitude",
+        authorName: courseForm.authorName.trim() || course.authorName || course.authorId || "Gratitude",
         isPaid: courseForm.isPaid,
-        thumbnailUrl: courseForm.thumbnailUrl.trim() || course.thumbnailUrl || "",
+        order: courseForm.order,
+        thumbnailUrl: thumbnailUpload?.thumbnailUrl || courseForm.thumbnailUrl.trim() || course.thumbnailUrl || "",
       };
       await apiRequest(`/v1/courses/${course.courseId}`, token, {
         method: "PUT",
         body: JSON.stringify(nextCourse),
       });
+      setThumbnailFile(null);
       await loadCourse(course.courseId);
       await loadCourses();
     });
@@ -493,6 +797,41 @@ function CoursesAdmin({ email }: { email: string }) {
       setCourse(null);
       setSelectedCourseId("");
       await loadCourses();
+    });
+  }
+
+  async function toggleCourseDisabled() {
+    if (!course) return;
+    const nextDisabled = !course.disabled;
+    await run(nextDisabled ? "Disabling course" : "Enabling course", async () => {
+      await apiRequest(`/v1/courses/${course.courseId}`, token, {
+        method: "PUT",
+        body: JSON.stringify({ disabled: nextDisabled }),
+      });
+      await loadCourse(course.courseId);
+      await loadCourses();
+    });
+  }
+
+  async function promoteCourse() {
+    if (!course) return;
+    await run("Checking production promotion", async () => {
+      const preview = await productionApiRequest<CoursePromotionReport>(`/v1/courses/${course.courseId}/promote`, token, {
+        method: "POST",
+        body: JSON.stringify({ apply: false }),
+      });
+      const approved = window.confirm(
+        `Promote “${preview.courseName}” to production?\n\n` +
+        `${preview.objects.length} asset(s) will be copied. The production course record will be created or replaced. Development will not be changed.`,
+      );
+      if (!approved) throw new Error("Promotion cancelled");
+      const confirmation = window.prompt(`Type the course ID to confirm:\n${course.courseId}`);
+      if (confirmation !== course.courseId) throw new Error("Promotion cancelled: course ID did not match");
+      const result = await productionApiRequest<CoursePromotionReport>(`/v1/courses/${course.courseId}/promote`, token, {
+        method: "POST",
+        body: JSON.stringify({ apply: true, confirmation }),
+      });
+      setOrderToast({ id: Date.now(), text: `Promoted to production: ${result.objectsCopied} assets copied` });
     });
   }
 
@@ -528,17 +867,17 @@ function CoursesAdmin({ email }: { email: string }) {
 
   async function uploadDownloadableFile(file: File, type = downloadableForm.type) {
     if (!course) throw new Error("Choose a course first");
-    const formData = new FormData();
-    formData.set("file", file);
-    formData.set("courseId", course.courseId);
-    formData.set("token", token);
-    formData.set("title", file.name);
-    formData.set("type", type || "file");
-
-    const response = await fetch("/api/downloadables/upload", { method: "POST", body: formData });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Downloadable upload failed");
-    return payload as DownloadableUploadResponse;
+    const upload = await apiRequest<DownloadableUploadResponse>(`/v1/courses/${course.courseId}/downloadables/upload`, token, {
+      method: "POST",
+      body: JSON.stringify({
+        fileName: file.name,
+        contentType: file.type || "application/octet-stream",
+        title: file.name,
+        type: type || "file",
+      }),
+    });
+    await putFileDirectly(file, upload);
+    return upload;
   }
 
   async function saveDownloadable(event: FormEvent) {
@@ -551,7 +890,8 @@ function CoursesAdmin({ email }: { email: string }) {
         : [];
       const uploaded = !shouldCreatePlaylist && uploadedFiles.length === 1 ? uploadedFiles[0] : null;
       const existingDownloadables = course.downloadables || [];
-      const assetId = downloadableForm.assetId || uploaded?.assetId || (shouldCreatePlaylist ? `playlist-${Date.now()}` : "");
+      const isExternalDownloadable = ["spotify", "external_link"].includes(downloadableForm.type.trim());
+      const assetId = downloadableForm.assetId || uploaded?.assetId || (shouldCreatePlaylist ? `playlist-${Date.now()}` : isExternalDownloadable ? `link-${Date.now()}` : "");
       const existingDownloadable = findCourseDownloadable(course, assetId);
       const unlockAfter = downloadableForm.unlockAfter.trim() || existingDownloadable?.unlockAfter || downloadableDayOptions(course)[0]?.value || "day-1";
       const playlistItems: CourseDownloadableItem[] = shouldCreatePlaylist
@@ -630,21 +970,45 @@ function CoursesAdmin({ email }: { email: string }) {
 
   async function uploadVideo() {
     if (!course || !videoFile) return null;
-    const formData = new FormData();
-    formData.set("file", videoFile);
-    formData.set("title", itemForm.title || videoFile.name);
-    formData.set("collectionId", course.courseId);
-    const response = await fetch("/api/bunny/upload", { method: "POST", body: formData });
-    const payload = await response.json();
-    if (!response.ok) throw new Error(payload.error || "Bunny upload failed");
-    setItemForm((value) => ({ ...value, videoId: payload.videoId, title: value.title || payload.title }));
-    return payload as { videoId: string; title?: string };
+    const file = videoFile;
+    const title = itemForm.title.trim() || file.name;
+    const session = await apiRequest<VideoUploadResponse>(`/v1/courses/${course.courseId}/videos/upload`, token, {
+      method: "POST",
+      body: JSON.stringify({ title }),
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const upload = new TusUpload(file, {
+        endpoint: session.uploadUrl,
+        headers: session.headers,
+        retryDelays: [0, 1000, 3000, 5000],
+        uploadSize: file.size,
+        metadata: { filename: file.name, filetype: file.type || "application/octet-stream", title },
+        onError: reject,
+        onProgress: (uploaded, total) => setMessage(`Uploading video ${Math.round((uploaded / total) * 100)}%`),
+        onSuccess: () => resolve(),
+      });
+      upload.start();
+    });
+
+    setItemForm((value) => ({ ...value, videoId: session.videoId, title: value.title || session.title }));
+    return { videoId: session.videoId, title: session.title };
   }
 
   async function saveItem(event: FormEvent) {
     event.preventDefault();
     if (!course) return;
     await run("Saving item", async () => {
+      const isIntroItem = itemForm.dayId.startsWith("intro-");
+      if (isIntroItem && !findCourseDay(course, itemForm.dayId)) {
+        await apiRequest(`/v1/courses/${course.courseId}/days/${itemForm.dayId}`, token, {
+          method: "PUT",
+          body: JSON.stringify({
+            ...defaultIntroDay(course),
+            dayId: itemForm.dayId,
+          }),
+        });
+      }
       const uploaded = videoFile && !itemForm.videoId ? await uploadVideo() : null;
       const existingItem = findCourseDayItem(course, itemForm.dayId, itemForm.itemId, itemForm.videoId);
       const nextItem = {
@@ -700,10 +1064,10 @@ function CoursesAdmin({ email }: { email: string }) {
 
   return (
     <main className="min-h-screen">
-      <header className="sticky top-0 z-20 border-b border-[#dfe3ea] bg-white/95 backdrop-blur">
+      <header className="app-header sticky top-0 z-20">
         <div className="flex h-16 items-center justify-between px-6">
           <div className="flex items-center gap-3">
-            <div className="grid h-9 w-9 place-items-center rounded bg-[#e94b76] text-white"><BookOpen size={19} /></div>
+            <div className="brand-mark"><BookOpen size={19} /></div>
             <div>
               <h1 className="text-lg font-semibold">Course Operations</h1>
               <p className="text-xs text-[#6b7280]">Signed in as {email}</p>
@@ -711,33 +1075,63 @@ function CoursesAdmin({ email }: { email: string }) {
           </div>
           <div className="flex items-center gap-3">
             <button onClick={() => run("Loading courses", loadCourses)} className="icon-button" title="Refresh courses"><RefreshCw size={17} /></button>
-            {CLERK_READY ? <UserButton /> : <span className="rounded border border-[#d8dce5] px-2 py-1 text-xs font-semibold text-[#6b7280]">Dev</span>}
+            {CLERK_READY ? <UserButton /> : <span className="environment-badge">Dev</span>}
           </div>
         </div>
       </header>
 
-      <div className="grid min-h-[calc(100vh-4rem)] grid-cols-[300px_minmax(360px,1fr)_460px] gap-0">
-        <aside className="border-r border-[#dfe3ea] bg-white p-4">
-          <div className="mb-4 rounded border border-[#d8dce5] p-3">
-            <label className="label">Backend admin bearer token</label>
-            <textarea value={token} onChange={(e) => setToken(e.target.value)} className="field min-h-20 font-mono text-xs" placeholder="Paste Firebase/admin bearer token" />
-          </div>
+      {orderToast && (
+        <div key={orderToast.id} className="order-toast" role="status" aria-live="polite">
+          <CheckCircle2 size={16} />
+          {orderToast.text}
+        </div>
+      )}
+
+      <div className="course-workspace">
+        <aside className="course-sidebar" aria-label="Courses">
+          <details className="connection-settings">
+            <summary>Backend authentication</summary>
+            <label className="label mt-3">Admin bearer token
+              <textarea value={token} onChange={(e) => setToken(e.target.value)} className="field min-h-20 font-mono text-xs" placeholder="Paste Firebase/admin bearer token" />
+            </label>
+          </details>
           <div className="mb-3 flex items-center justify-between">
             <h2 className="section-title">Courses</h2>
-            <button onClick={syncBunny} className="icon-button" title="Sync Bunny collections"><RefreshCw size={16} /></button>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={startNewCourse} className="small-button"><Plus size={15} /> New course</button>
+              <button onClick={syncBunny} className="icon-button" title="Sync Bunny collections"><RefreshCw size={16} /></button>
+            </div>
           </div>
           <div className="space-y-2">
             {courses.map((item) => (
-              <button key={item.courseId} onClick={() => run("Loading course", () => loadCourse(item.courseId))} className={`list-row text-left ${selectedCourseId === item.courseId ? "list-row-active" : ""}`}>
-                <span className="font-medium">{item.name}</span>
+              <button
+                key={item.courseId}
+                draggable={!busy}
+                onDragStart={(event) => setDragData(event, "course", item.courseId)}
+                onDragEnd={clearDragStyle}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  const dragged = readDragData(event);
+                  if (dragged?.kind === "course") void reorderCourses(dragged.id, item.courseId);
+                }}
+                onClick={() => run("Loading course", () => loadCourse(item.courseId))}
+                className={`list-row text-left ${selectedCourseId === item.courseId ? "list-row-active" : ""}`}
+              >
+                <span className="flex items-center justify-between gap-2">
+                  <span className="flex min-w-0 items-center gap-1.5"><GripVertical size={14} className="shrink-0 text-[#9aa1ad]" /><span className="font-medium">{item.name}</span></span>
+                  <span className={`status-pill ${item.disabled ? "status-pill-disabled" : "status-pill-enabled"}`}>
+                    {item.disabled ? "Disabled" : "Enabled"}
+                  </span>
+                </span>
                 <span className="text-xs text-[#6b7280]">{item.dayCount} days</span>
               </button>
             ))}
           </div>
         </aside>
 
-        <section className="overflow-y-auto p-6">
-          <div className="mb-4 flex items-center justify-between">
+        <section className="course-content">
+          <div className="course-heading mb-4 flex items-center justify-between">
             <div>
               <h2 className="text-2xl font-semibold">{course?.name || "New course"}</h2>
               <p className="text-sm text-[#6b7280]">{message}{busy ? "..." : ""}</p>
@@ -745,18 +1139,26 @@ function CoursesAdmin({ email }: { email: string }) {
             {(busy || initialLoading) && <Loader2 className="animate-spin text-[#e94b76]" />}
           </div>
 
-          <div className="mb-5 rounded border border-[#dfe3ea] bg-white p-4">
-            <div className="flex items-center justify-between gap-3">
+          {course && <div className="course-metadata-bar">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <button className="inline-flex items-center gap-2 text-left" onClick={editCourse}>
                 <BookOpen size={18} className="text-[#e94b76]" />
                 <span>
                   <span className="block text-sm font-semibold">Course metadata</span>
-                  <span className="block text-xs text-[#6b7280]">Name, thumbnail, payment, author</span>
                 </span>
               </button>
-              <button className="secondary-button" onClick={editCourse}><Pencil size={15} /> Edit</button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button className="secondary-button" onClick={addIntroVideo}><Video size={15} /> Intro video</button>
+                <button className="secondary-button" onClick={editCourse}><Pencil size={15} /> Edit</button>
+                <button className="secondary-button" onClick={promoteCourse} disabled={busy || !PROD_API_BASE} title={!PROD_API_BASE ? "Configure NEXT_PUBLIC_COURSES_PROD_API_BASE_URL" : "Copy this course and its assets to production"}>
+                  <Upload size={15} /> Promote
+                </button>
+                <button className={course.disabled ? "primary-button" : "secondary-button"} onClick={toggleCourseDisabled} disabled={busy}>
+                  <Power size={15} /> {course.disabled ? "Enable" : "Disable"}
+                </button>
+              </div>
             </div>
-          </div>
+          </div>}
 
           {initialLoading && !course && (
             <div className="panel grid min-h-40 place-items-center text-sm font-semibold text-[#6b7280]">
@@ -764,7 +1166,7 @@ function CoursesAdmin({ email }: { email: string }) {
             </div>
           )}
 
-          {!initialLoading && !course && (
+          {!initialLoading && !course && !isCreatingCourse && (
             <div className="panel grid min-h-40 place-items-center text-center">
               <div>
                 <p className="text-sm font-semibold">No course selected</p>
@@ -773,26 +1175,34 @@ function CoursesAdmin({ email }: { email: string }) {
             </div>
           )}
 
+          {isCreatingCourse && (
+            <div className="panel grid min-h-40 place-items-center text-center">
+              <div>
+                <BookOpen className="mx-auto mb-3 text-[#e94b76]" size={24} />
+                <p className="text-sm font-semibold">Create a new course</p>
+                <p className="mt-1 max-w-sm text-xs text-[#6b7280]">Complete the course metadata in the editor. Saving creates its Bunny collection and DynamoDB record.</p>
+              </div>
+            </div>
+          )}
+
           {course && (
-            <div className="space-y-4">
-              {!!course.introVideos?.length && (
-                <CourseSection
-                  title="Introduction"
-                  days={course.introVideos}
-                  downloadables={course.downloadables || []}
-                  onEditDay={editDay}
-                  onAddVideo={addVideoToDay}
-                  onAddText={addTextToDay}
-                  onAddDownloadable={addDownloadableToDay}
-                  onEditItem={editItem}
-                  onEditDownloadable={editDownloadable}
-                  onDeleteItem={deleteItem}
-                  onDeleteDownloadable={deleteDownloadable}
-                  onDeleteDay={deleteDay}
-                />
-              )}
+            <div className="course-sections">
               <CourseSection
-                title="Days"
+                days={introVideoDays(course)}
+                downloadables={course.downloadables || []}
+                onEditDay={editDay}
+                onAddVideo={addVideoToDay}
+                onAddText={addTextToDay}
+                onAddDownloadable={addDownloadableToDay}
+                onEditItem={editItem}
+                onEditDownloadable={editDownloadable}
+                onDeleteItem={deleteItem}
+                onDeleteDownloadable={deleteDownloadable}
+                onDeleteDay={deleteDay}
+                onReorderItem={reorderItems}
+                introOnly
+              />
+              <CourseSection
                 days={course.days}
                 downloadables={course.downloadables || []}
                 onEditDay={editDay}
@@ -804,6 +1214,10 @@ function CoursesAdmin({ email }: { email: string }) {
                 onDeleteItem={deleteItem}
                 onDeleteDownloadable={deleteDownloadable}
                 onDeleteDay={deleteDay}
+                onAddDay={addDay}
+                onReorderDay={reorderDays}
+                onReorderItem={reorderItems}
+                onReorderDownloadable={reorderDownloadables}
               />
               <DownloadablesSection
                 downloadables={course.downloadables || []}
@@ -815,15 +1229,15 @@ function CoursesAdmin({ email }: { email: string }) {
           )}
         </section>
 
-        <aside className="overflow-y-auto border-l border-[#dfe3ea] bg-white p-5">
-          <div className="mb-4">
+        <aside className="course-editor" aria-label="Course editor">
+          <div className="editor-heading">
             <h3 className="text-base font-semibold">Editor</h3>
-            <p className="text-xs text-[#6b7280]">Choose one operation, edit, save.</p>
+            <span className="editor-context">{isCreatingCourse ? "New course" : course?.name || "No course selected"}</span>
           </div>
 
           <label className="label mb-4">
             Operation
-            <select className="field" value={editorMode} onChange={(e) => setEditorMode(e.target.value as EditorMode)}>
+            <select className="field" value={editorMode} disabled={!course} onChange={(e) => setEditorMode(e.target.value as EditorMode)}>
               <option value="course">Course metadata</option>
               <option value="day">Day metadata</option>
               <option value="video">Video item</option>
@@ -838,12 +1252,23 @@ function CoursesAdmin({ email }: { email: string }) {
               <div className="grid grid-cols-2 gap-3">
                 <label className="label col-span-2">Name<input className="field" value={courseForm.name} onChange={(e) => setCourseForm({ ...courseForm, name: e.target.value })} /></label>
                 <label className="label col-span-2">Description<textarea className="field min-h-24" value={courseForm.description} onChange={(e) => setCourseForm({ ...courseForm, description: e.target.value })} /></label>
-                <label className="label">Author<input className="field" value={courseForm.authorId} onChange={(e) => setCourseForm({ ...courseForm, authorId: e.target.value })} /></label>
+                <label className="label">Author name<input className="field" value={courseForm.authorName} onChange={(e) => setCourseForm({ ...courseForm, authorName: e.target.value })} /></label>
+                <label className="label">Course order<input type="number" step="1" className="field" value={courseForm.order} onChange={(e) => setCourseForm({ ...courseForm, order: Number(e.target.value) })} /></label>
                 <label className="label">Thumbnail URL<input className="field" value={courseForm.thumbnailUrl} onChange={(e) => setCourseForm({ ...courseForm, thumbnailUrl: e.target.value })} /></label>
+                <label className="label col-span-2">
+                  Upload thumbnail
+                  <input
+                    type="file"
+                    accept="image/*"
+                    className="file-field"
+                    onChange={(event) => setThumbnailFile(event.target.files?.[0] || null)}
+                  />
+                  {thumbnailFile && <span className="mt-1 text-xs text-slate-500">Will upload compressed WebP: {thumbnailFile.name}</span>}
+                </label>
                 <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={courseForm.isPaid} onChange={(e) => setCourseForm({ ...courseForm, isPaid: e.target.checked })} /> Paid course</label>
               </div>
               <div className="mt-4 flex gap-2">
-                <button className="primary-button" disabled={busy}><Save size={16} /> {course ? "Save course" : "Create course"}</button>
+                <button className="primary-button" disabled={busy || !courseForm.name.trim()}><Save size={16} /> {course ? "Save course" : "Create course"}</button>
                 {course && <button type="button" onClick={deleteCourse} className="danger-button"><Trash2 size={16} /> Delete</button>}
               </div>
             </form>
@@ -925,6 +1350,8 @@ function CoursesAdmin({ email }: { email: string }) {
                     <option value="image">Image</option>
                     <option value="pdf">PDF</option>
                     <option value="zip">ZIP</option>
+                    <option value="spotify">Spotify Playlist</option>
+                    <option value="external_link">External Link</option>
                     <option value="playlist">Playlist</option>
                   </select>
                 </label>
@@ -969,6 +1396,32 @@ function CoursesAdmin({ email }: { email: string }) {
                     </div>
                   </div>
                 )}
+                {downloadableForm.assetId && (findCourseDownloadable(course, downloadableForm.assetId)?.items?.length || 0) > 0 && (
+                  <div className="col-span-2 rounded border border-[#e1e5ee] bg-[#f8fafc] p-3">
+                    <div className="mb-2 text-xs font-semibold text-[#4b5563]">Playlist order</div>
+                    <div className="space-y-1">
+                      {[...(findCourseDownloadable(course, downloadableForm.assetId)?.items || [])]
+                        .sort((a, b) => a.order - b.order)
+                        .map((item) => (
+                          <div
+                            key={item.assetId}
+                            className="playlist-order-row"
+                            onDragOver={(event) => event.preventDefault()}
+                            onDrop={(event) => {
+                              const dragged = readDragData(event);
+                              if (dragged?.kind === "playlist-item" && dragged.parentId === downloadableForm.assetId) {
+                                event.preventDefault();
+                                void reorderDownloadableItems(downloadableForm.assetId, dragged.id, item.assetId);
+                              }
+                            }}
+                          >
+                            <span draggable onDragStart={(event) => setDragData(event, "playlist-item", item.assetId, downloadableForm.assetId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag playlist file"><GripVertical size={14} /></span>
+                            <span className="truncate text-xs text-[#4b5563]">{item.order}. {item.title}</span>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
                 <label className="label col-span-2">Existing URL<input className="field" value={downloadableForm.url} onChange={(e) => setDownloadableForm({ ...downloadableForm, url: e.target.value })} placeholder="Filled automatically after upload" /></label>
               </div>
               <button className="primary-button mt-4" disabled={!course || busy}><Upload size={16} /> Save reward</button>
@@ -982,8 +1435,7 @@ function CoursesAdmin({ email }: { email: string }) {
   );
 }
 
-function CourseSection({ title, days, downloadables, onEditDay, onAddVideo, onAddText, onAddDownloadable, onEditItem, onEditDownloadable, onDeleteItem, onDeleteDownloadable, onDeleteDay }: {
-  title: string;
+function CourseSection({ days, downloadables, onEditDay, onAddVideo, onAddText, onAddDownloadable, onEditItem, onEditDownloadable, onDeleteItem, onDeleteDownloadable, onDeleteDay, onAddDay, onReorderDay, onReorderItem, onReorderDownloadable, introOnly = false }: {
   days: CourseDay[];
   downloadables: CourseDownloadable[];
   onEditDay: (day: CourseDay) => void;
@@ -995,20 +1447,42 @@ function CourseSection({ title, days, downloadables, onEditDay, onAddVideo, onAd
   onDeleteItem: (dayId: string, itemId: string) => void;
   onDeleteDownloadable: (assetId: string) => void;
   onDeleteDay: (dayId: string) => void;
+  onAddDay?: () => void;
+  onReorderDay?: (sourceId: string, targetId: string) => Promise<void>;
+  onReorderItem: (dayId: string, sourceId: string, targetId: string) => Promise<void>;
+  onReorderDownloadable?: (dayId: string, sourceId: string, targetId: string) => Promise<void>;
+  introOnly?: boolean;
 }) {
   return (
-    <section>
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="text-sm font-semibold uppercase tracking-wide text-[#6b7280]">{title}</h3>
-        <span className="text-xs font-semibold text-[#7b6f78]">{days.length} {days.length === 1 ? "group" : "groups"}</span>
-      </div>
+    <section className={`course-section course-section-${introOnly ? "introduction" : "days"}`}>
+      {onAddDay && (
+        <div className="course-section-tools">
+          <button type="button" className="small-button" onClick={onAddDay}><Plus size={14} /> New day</button>
+          <span>{days.length} {days.length === 1 ? "group" : "groups"}</span>
+        </div>
+      )}
       <div className="space-y-2">
         {days.map((day) => {
           const dayDownloadables = downloadablesForDay(downloadables, day.dayId);
           return (
-          <details key={day.dayId} className="tree-node" open={day.dayNumber <= 2 || day.dayId.startsWith("intro-")}>
+          <details
+            key={day.dayId}
+            className="tree-node"
+            open={day.dayNumber <= 2 || day.dayId.startsWith("intro-")}
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              const dragged = readDragData(event);
+              if (dragged?.kind === "day" && onReorderDay) {
+                event.preventDefault();
+                void onReorderDay(dragged.id, day.dayId);
+              }
+            }}
+          >
             <summary className="tree-summary">
-              <span className="tree-chevron"><ChevronDown size={16} /></span>
+              <span className="tree-leading">
+                {!introOnly && <span draggable onDragStart={(event) => setDragData(event, "day", day.dayId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag day"><GripVertical size={15} /></span>}
+                <span className="tree-chevron"><ChevronDown size={16} /></span>
+              </span>
               <span className="min-w-0">
                 <span className="block truncate font-semibold">{day.title || day.dayId}</span>
                 <span className="block text-xs text-[#6b7280]">
@@ -1018,15 +1492,32 @@ function CourseSection({ title, days, downloadables, onEditDay, onAddVideo, onAd
               <span className="tree-actions">
                 <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onEditDay(day); }}><Pencil size={14} /> Day</button>
                 <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onAddVideo(day); }}><Video size={14} /> Video</button>
-                <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onAddText(day); }}><FileText size={14} /> Text</button>
-                <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onAddDownloadable(day); }}><Download size={14} /> Reward</button>
-                <button type="button" className="icon-button compact" onClick={(event) => { event.preventDefault(); onDeleteDay(day.dayId); }} title="Delete day"><Trash2 size={14} /></button>
+                {!introOnly && <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onAddText(day); }}><FileText size={14} /> Text</button>}
+                {!introOnly && <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onAddDownloadable(day); }}><Download size={14} /> Reward</button>}
+                {(!introOnly || day.items.length > 0) && <button type="button" className="icon-button compact" onClick={(event) => { event.preventDefault(); onDeleteDay(day.dayId); }} title="Delete day"><Trash2 size={14} /></button>}
               </span>
             </summary>
             <div className="tree-items">
+              {day.items.length === 0 && (
+                <div className="px-5 py-4 text-sm text-[#6b7280]">No intro video yet. Use Video to add the descriptive course video.</div>
+              )}
               {sortItems(day.items).map((item) => (
-                <div key={item.itemId} className="tree-item">
-                  {item.type === "prompt" ? <FileText size={18} className="text-[#7b6f78]" /> : <Video size={18} className="text-[#e94b76]" />}
+                <div
+                  key={item.itemId}
+                  className="tree-item"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    const dragged = readDragData(event);
+                    if (dragged?.kind === "item" && dragged.parentId === day.dayId) {
+                      event.preventDefault();
+                      void onReorderItem(day.dayId, dragged.id, item.itemId);
+                    }
+                  }}
+                >
+                  <span className="tree-item-leading">
+                    <span draggable onDragStart={(event) => setDragData(event, "item", item.itemId, day.dayId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag content"><GripVertical size={14} /></span>
+                    {item.type === "prompt" ? <FileText size={18} className="text-[#7b6f78]" /> : <Video size={18} className="text-[#e94b76]" />}
+                  </span>
                   <button className="min-w-0 text-left" onClick={() => onEditItem(day, item)}>
                     <div className="text-sm font-medium">{item.order}. {item.title}</div>
                     <div className="text-xs text-[#6b7280]">{item.itemId} · {item.type} · {secondsToLabel(item.durationSeconds)}</div>
@@ -1035,8 +1526,22 @@ function CourseSection({ title, days, downloadables, onEditDay, onAddVideo, onAd
                 </div>
               ))}
               {dayDownloadables.map((downloadable) => (
-                <div key={downloadable.assetId} className="tree-item">
-                  <Download size={18} className="text-[#e94b76]" />
+                <div
+                  key={downloadable.assetId}
+                  className="tree-item"
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    const dragged = readDragData(event);
+                    if (dragged?.kind === "reward" && dragged.parentId === day.dayId && onReorderDownloadable) {
+                      event.preventDefault();
+                      void onReorderDownloadable(day.dayId, dragged.id, downloadable.assetId);
+                    }
+                  }}
+                >
+                  <span className="tree-item-leading">
+                    <span draggable onDragStart={(event) => setDragData(event, "reward", downloadable.assetId, day.dayId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag reward"><GripVertical size={14} /></span>
+                    <Download size={18} className="text-[#e94b76]" />
+                  </span>
                   <button className="min-w-0 text-left" onClick={() => onEditDownloadable(downloadable)}>
                     <div className="text-sm font-medium">{downloadable.order}. {downloadable.title}</div>
                     <div className="text-xs text-[#6b7280]">
@@ -1067,11 +1572,7 @@ function DownloadablesSection({ downloadables, days, onEdit, onDelete }: {
   });
 
   return (
-    <section>
-      <div className="mb-2 flex items-center justify-between">
-        <h3 className="text-sm font-semibold uppercase tracking-wide text-[#6b7280]">Rewards</h3>
-        <span className="text-xs font-semibold text-[#7b6f78]">{sortedDownloadables.length} files</span>
-      </div>
+    <section className="course-section course-section-rewards">
       <div className="tree-node">
         {sortedDownloadables.length === 0 ? (
           <div className="p-4 text-sm text-[#6b7280]">No rewards added yet.</div>

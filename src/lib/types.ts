@@ -25,7 +25,7 @@ export type CourseDay = {
 export type CourseDownloadableItem = {
   assetId: string;
   title: string;
-  type: "image" | "pdf" | "zip" | "file" | string;
+  type: "image" | "pdf" | "zip" | "spotify" | "external_link" | "file" | string;
   url: string;
   order: number;
 };
@@ -33,7 +33,7 @@ export type CourseDownloadableItem = {
 export type CourseDownloadable = {
   assetId: string;
   title: string;
-  type: "image" | "pdf" | "zip" | "playlist" | "file" | string;
+  type: "image" | "pdf" | "zip" | "playlist" | "spotify" | "external_link" | "file" | string;
   url?: string;
   unlockAfter: string;
   order: number;
@@ -41,11 +41,14 @@ export type CourseDownloadable = {
 };
 
 export type Course = {
+  order?: number;
   courseId: string;
   name: string;
   description: string;
   authorId: string;
+  authorName?: string;
   isPaid: boolean;
+  disabled?: boolean;
   thumbnailUrl?: string;
   introVideos?: CourseDay[];
   days: CourseDay[];
@@ -54,11 +57,14 @@ export type Course = {
 };
 
 export type CourseSummary = {
+  order?: number;
   courseId: string;
   name: string;
   description: string;
   authorId: string;
+  authorName?: string;
   isPaid: boolean;
+  disabled?: boolean;
   thumbnailUrl?: string;
   dayCount: number;
   timestamps: string;
