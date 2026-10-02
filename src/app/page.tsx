@@ -14,19 +14,15 @@ import {
   Power,
   RefreshCw,
   Save,
-  ShieldCheck,
   Trash2,
   Upload,
   Video,
 } from "lucide-react";
-import { SignInButton, UserButton, useUser } from "@clerk/nextjs";
 import { Upload as TusUpload } from "tus-js-client";
 import type { ApiEnvelope, Course, CourseDay, CourseDayItem, CourseDownloadable, CourseDownloadableItem, CourseSummary } from "@/lib/types";
 
 const API_BASE = (process.env.NEXT_PUBLIC_COURSES_API_BASE_URL || "https://api-dev.gratefulness.me").replace(/\/$/, "");
 const PROD_API_BASE = (process.env.NEXT_PUBLIC_COURSES_PROD_API_BASE_URL || "").replace(/\/$/, "");
-const ADMIN_DOMAIN = process.env.NEXT_PUBLIC_ADMIN_EMAIL_DOMAIN || "gratefulness.me";
-const CLERK_READY = Boolean(process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY);
 
 const emptyCourseForm = {
   order: 0,
@@ -325,75 +321,10 @@ function findCourseDayItem(course: Course | null, dayId: string, itemId: string,
 type EditorMode = "course" | "day" | "video" | "text" | "downloadable";
 
 export default function Home() {
-  if (!CLERK_READY) {
-    return <CoursesAdmin email={`local-dev@${ADMIN_DOMAIN}`} />;
-  }
-
-  return <ClerkHome />;
+  return <CoursesAdmin />;
 }
 
-function ClerkHome() {
-  const { isLoaded, isSignedIn } = useUser();
-
-  if (!isLoaded) {
-    return (
-      <main className="grid min-h-screen place-items-center px-6">
-        <Loader2 className="animate-spin text-[#e94b76]" />
-      </main>
-    );
-  }
-
-  if (!isSignedIn) {
-    return <AuthScreen />;
-  }
-
-  return <AdminGate />;
-}
-
-function AuthScreen() {
-  return (
-    <main className="grid min-h-screen place-items-center bg-[#f6f7f9] px-6">
-      <section className="w-full max-w-md rounded border border-[#d8dce5] bg-white p-8 shadow-sm">
-        <div className="mb-6 flex items-center gap-3">
-          <div className="grid h-10 w-10 place-items-center rounded bg-[#e94b76] text-white">
-            <ShieldCheck size={21} />
-          </div>
-          <div>
-            <h1 className="text-xl font-semibold">Gratitude Course Admin</h1>
-            <p className="text-sm text-[#6b7280]">Sign in with your @{ADMIN_DOMAIN} account.</p>
-          </div>
-        </div>
-        <SignInButton mode="modal">
-          <button className="h-11 w-full rounded bg-[#20232d] px-4 text-sm font-semibold text-white hover:bg-[#343948]">
-            Sign in
-          </button>
-        </SignInButton>
-      </section>
-    </main>
-  );
-}
-
-function AdminGate() {
-  const { user } = useUser();
-  const email = user?.primaryEmailAddress?.emailAddress || "";
-  const allowed = email.endsWith(`@${ADMIN_DOMAIN}`);
-
-  if (!allowed) {
-    return (
-      <main className="grid min-h-screen place-items-center px-6">
-        <section className="w-full max-w-lg rounded border border-[#f0c6d2] bg-white p-8">
-          <h1 className="text-xl font-semibold">Admin access only</h1>
-          <p className="mt-2 text-sm text-[#6b7280]">Use an @{ADMIN_DOMAIN} email to edit course content.</p>
-          <div className="mt-6"><UserButton /></div>
-        </section>
-      </main>
-    );
-  }
-
-  return <CoursesAdmin email={email} />;
-}
-
-function CoursesAdmin({ email }: { email: string }) {
+function CoursesAdmin() {
   const [token, setToken] = useState(() =>
     typeof window === "undefined" ? "" : localStorage.getItem("coursesAdminToken") || "",
   );
@@ -1070,12 +1001,12 @@ function CoursesAdmin({ email }: { email: string }) {
             <div className="brand-mark"><BookOpen size={19} /></div>
             <div>
               <h1 className="text-lg font-semibold">Course Operations</h1>
-              <p className="text-xs text-[#6b7280]">Signed in as {email}</p>
+              <p className="text-xs text-[#6b7280]">Internal course operations</p>
             </div>
           </div>
           <div className="flex items-center gap-3">
             <button onClick={() => run("Loading courses", loadCourses)} className="icon-button" title="Refresh courses"><RefreshCw size={17} /></button>
-            {CLERK_READY ? <UserButton /> : <span className="environment-badge">Dev</span>}
+            <span className="environment-badge">Dev</span>
           </div>
         </div>
       </header>

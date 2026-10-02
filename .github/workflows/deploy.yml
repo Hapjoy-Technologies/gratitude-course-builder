@@ -28,8 +28,6 @@ jobs:
         env:
           NEXT_PUBLIC_COURSES_API_BASE_URL: https://api-dev.gratefulness.me
           NEXT_PUBLIC_COURSES_PROD_API_BASE_URL: https://api.gratefulness.me
-          NEXT_PUBLIC_ADMIN_EMAIL_DOMAIN: gratefulness.me
-          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: ./out
