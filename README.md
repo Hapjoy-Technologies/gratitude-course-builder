@@ -31,7 +31,6 @@ npm run dev
 - `POST /v1/courses`
 - `PUT /v1/courses/{courseId}`
 - `DELETE /v1/courses/{courseId}`
-- `POST /v1/courses/sync-bunny`
 - `PUT /v1/courses/{courseId}/days/{dayId}`
 - `DELETE /v1/courses/{courseId}/days/{dayId}`
 - `PUT /v1/courses/{courseId}/items`

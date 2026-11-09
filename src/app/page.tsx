@@ -802,14 +802,6 @@ function CoursesAdmin() {
     });
   }
 
-  async function syncBunny() {
-    await run("Syncing Bunny", async () => {
-      await apiRequest("/v1/courses/sync-bunny", token, { method: "POST", body: "{}" });
-      await loadCourses();
-      if (selectedCourseId) await loadCourse(selectedCourseId);
-    });
-  }
-
   async function saveDay(event: FormEvent) {
     event.preventDefault();
     if (!course) return;
@@ -1105,7 +1097,6 @@ function CoursesAdmin() {
               <h2 className="section-title">Courses</h2>
               <div className="flex items-center gap-2">
                 <button type="button" onClick={startNewCourse} className="small-button"><Plus size={15} /> New course</button>
-                <button onClick={syncBunny} className="icon-button" title="Sync Bunny collections"><RefreshCw size={16} /></button>
               </div>
             </div>
             <div className="space-y-2">
