@@ -330,7 +330,10 @@ export default function Home() {
 }
 
 function CoursesAdmin() {
-  const token = "";
+  // Admin bearer token (Firebase ID token); production requires it for Promote.
+  const [token, setToken] = useState(() =>
+    typeof window === "undefined" ? "" : localStorage.getItem("coursesAdminToken") || "",
+  );
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
   const [passwordError, setPasswordError] = useState("");
@@ -365,6 +368,10 @@ function CoursesAdmin() {
       }
     }
   }, []);
+
+  useEffect(() => {
+    localStorage.setItem("coursesAdminToken", token);
+  }, [token]);
 
   useEffect(() => {
     if (!orderToast) return;
@@ -1093,6 +1100,12 @@ function CoursesAdmin() {
       ) : (
         <div className="course-workspace">
           <aside className="course-sidebar" aria-label="Courses">
+            <details className="connection-settings">
+              <summary>Backend authentication</summary>
+              <label className="label mt-3">Admin bearer token
+                <textarea value={token} onChange={(e) => setToken(e.target.value)} className="field min-h-20 font-mono text-xs" placeholder="Paste Firebase/admin bearer token (needed for Promote)" />
+              </label>
+            </details>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="section-title">Courses</h2>
               <div className="flex items-center gap-2">
