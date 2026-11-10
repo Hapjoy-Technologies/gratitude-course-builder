@@ -117,6 +117,43 @@ async function putFileDirectly(file: File, upload: { uploadUrl: string; method?:
   }
 }
 
+/** A pasted token without a leading "Bearer " or stray whitespace: the API adds "Bearer" itself. */
+function normalizeToken(value: string): string {
+  return value.replace(/\s+/g, "").replace(/^bearer/i, "");
+}
+
+const ADMIN_EMAIL_DOMAIN = "gratefulness.me";
+
+type TokenStatus = { tone: "ok" | "warn"; text: string };
+
+/**
+ * What the pasted Firebase ID token says about who it belongs to. Read only for this hint: the
+ * backend verifies the token and decides. Admins are verified Google accounts on gratefulness.me.
+ */
+function describeToken(token: string): TokenStatus | null {
+  if (!token) return null;
+  try {
+    const part = token.split(".")[1];
+    const json = atob(part.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(part.length / 4) * 4, "="));
+    const claims = JSON.parse(json) as {
+      email?: string;
+      email_verified?: boolean;
+      exp?: number;
+      firebase?: { sign_in_provider?: string };
+    };
+    if (claims.exp && claims.exp * 1000 < Date.now()) return { tone: "warn", text: "This token has expired. Copy a fresh one (they last about an hour)." };
+    if (claims.firebase?.sign_in_provider === "anonymous") return { tone: "warn", text: "This token is from an anonymous user. Sign in with your @gratefulness.me Google account in the app first." };
+    const email = claims.email?.toLowerCase() ?? "";
+    if (!email) return { tone: "warn", text: "This token has no email. Sign in with your @gratefulness.me Google account." };
+    const minutes = claims.exp ? Math.max(0, Math.round((claims.exp * 1000 - Date.now()) / 60000)) : null;
+    const expiry = minutes === null ? "" : ` Expires in ${minutes} min.`;
+    if (claims.email_verified && email.endsWith(`@${ADMIN_EMAIL_DOMAIN}`)) return { tone: "ok", text: `Signed in as ${email}: can promote.${expiry}` };
+    return { tone: "warn", text: `Signed in as ${email}. Only verified @${ADMIN_EMAIL_DOMAIN} accounts can promote.${expiry}` };
+  } catch {
+    return { tone: "warn", text: "This doesn't look like a Firebase ID token." };
+  }
+}
+
 async function apiRequest<T>(path: string, token: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -330,10 +367,11 @@ export default function Home() {
 }
 
 function CoursesAdmin() {
-  // Admin bearer token (Firebase ID token); production requires it for Promote.
+  // Firebase ID token from a verified @gratefulness.me Google sign-in; production requires it for Promote.
   const [token, setToken] = useState(() =>
-    typeof window === "undefined" ? "" : localStorage.getItem("coursesAdminToken") || "",
+    typeof window === "undefined" ? "" : normalizeToken(localStorage.getItem("coursesAdminToken") || ""),
   );
+  const tokenStatus = describeToken(token);
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
   const [passwordError, setPasswordError] = useState("");
@@ -1102,9 +1140,12 @@ function CoursesAdmin() {
           <aside className="course-sidebar" aria-label="Courses">
             <details className="connection-settings">
               <summary>Backend authentication</summary>
-              <label className="label mt-3">Admin bearer token
-                <textarea value={token} onChange={(e) => setToken(e.target.value)} className="field min-h-20 font-mono text-xs" placeholder="Paste Firebase/admin bearer token (needed for Promote)" />
+              <label className="label mt-3">Admin token
+                <textarea value={token} onChange={(e) => setToken(normalizeToken(e.target.value))} className="field min-h-20 font-mono text-xs" placeholder="Paste the Firebase ID token from your @gratefulness.me Google sign-in (needed for Promote)" />
               </label>
+              {tokenStatus && (
+                <p className={`mt-2 text-xs ${tokenStatus.tone === "ok" ? "text-emerald-700" : "text-amber-700"}`}>{tokenStatus.text}</p>
+              )}
             </details>
             <div className="mb-3 flex items-center justify-between">
               <h2 className="section-title">Courses</h2>

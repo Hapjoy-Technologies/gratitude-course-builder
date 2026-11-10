@@ -11,8 +11,9 @@ Internal course operations tool for the Gratitude backend.
 
 ## Access model
 
-- The web tool has no sign-in screen.
-- The web tool calls the course-management endpoints without an authentication token.
+- The web tool has no sign-in screen. Paste a Firebase ID token under **Backend authentication**; it's sent as `Authorization: Bearer <token>` (paste the token alone, a leading `Bearer` is stripped).
+- Course admin actions, including **Promote**, need a token from a **verified Google account on `@gratefulness.me`**. The backend checks this (`COURSES_ADMIN_EMAIL_DOMAINS`); the tool shows whose token is pasted and whether it can promote.
+- To get a token: sign in to a debug build of the Gratitude Android app with your `@gratefulness.me` Google account, open Courses, and copy the `Authorization: Bearer …` value from logcat (tag `okhttp.OkHttpClient`). Tokens last about an hour.
 
 ## Setup
 
