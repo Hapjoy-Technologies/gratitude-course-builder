@@ -358,6 +358,14 @@ function findCourseDay(course: Course | null, dayId: string) {
   return courseDays(course).find((day) => day.dayId === dayId) || null;
 }
 
+/** The id the backend gives a day's new prompt: "{dayId}-prompt", or "{dayId}-prompt-2" and on when an instruction made from an old prompt holds it. */
+function newPromptItemId(day: ReturnType<typeof findCourseDay>, dayId: string) {
+  const taken = new Set((day?.items || []).map((item) => item.itemId));
+  let itemId = `${dayId}-prompt`;
+  for (let n = 2; taken.has(itemId); n++) itemId = `${dayId}-prompt-${n}`;
+  return itemId;
+}
+
 function findCourseDayItem(course: Course | null, dayId: string, itemId: string, videoId?: string) {
   const day = findCourseDay(course, dayId);
   if (!day) return null;
@@ -1374,7 +1382,7 @@ function CoursesAdmin() {
         textContent: nextPrompt.textContent,
         contentFormat: nextPrompt.contentFormat,
         items: upsertLocalItem(day.items, {
-          itemId: existingPrompt?.itemId || `${nextPrompt.dayId}-prompt`,
+          itemId: existingPrompt?.itemId || newPromptItemId(existingDay, nextPrompt.dayId),
           type: "prompt",
           order: nextPrompt.order,
           title: nextPrompt.title,
