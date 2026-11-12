@@ -367,7 +367,7 @@ function findCourseDayItem(course: Course | null, dayId: string, itemId: string,
   }) || null;
 }
 
-type EditorMode = "course" | "day" | "video" | "text" | "instruction" | "downloadable";
+type EditorMode = "course" | "day" | "video" | "text" | "instruction" | "downloadable" | "review";
 
 export default function Home() {
   return <CoursesAdmin />;
@@ -907,7 +907,11 @@ function CoursesAdmin() {
   // Moves the day's prompt into the instruction form. Saving it turns that prompt into an instruction
   // in place (same item id, so people's progress is kept) and clears the day's prompt text.
   function promptToInstruction() {
-    const day = findCourseDay(course, promptForm.dayId);
+    promptToInstructionFor(promptForm.dayId);
+  }
+
+  function promptToInstructionFor(dayId: string) {
+    const day = findCourseDay(course, dayId);
     const prompt = day?.items.find((item) => item.type === "prompt");
     if (!day || !prompt) return;
     setInstructionForm({
@@ -1423,6 +1427,8 @@ function CoursesAdmin() {
         return { kind: "prompt", icon: <PenLine size={17} />, title: promptDayHasPrompt ? "Edit prompt" : "New prompt", context: dayText(promptForm.dayId), save: "Save prompt", disabled: !course || busy };
       case "instruction":
         return { kind: "instruction", icon: <BookOpen size={17} />, title: convertingPrompt ? "Make it an instruction" : instructionForm.itemId ? "Edit instruction" : "New instruction", context: dayText(instructionForm.dayId), save: "Save instruction", disabled: !course || busy || !instructionForm.title.trim() || !instructionForm.description.trim() };
+      case "review":
+        return { kind: "prompt", icon: <PenLine size={17} />, title: "Check prompts", context: course?.name || "", save: "", disabled: true };
       case "downloadable":
         return { kind: "reward", icon: <Gift size={17} />, title: downloadableForm.assetId ? "Edit reward" : "New reward", context: downloadableForm.unlockAfter === "course" ? "Course reward" : `Unlocks after ${dayText(downloadableForm.unlockAfter)}`, save: "Save reward", disabled: !course || busy };
       default:
@@ -1645,6 +1651,9 @@ function CoursesAdmin() {
                           <Power size={15} /> {publishedState === "disabled" ? "Enable in published app" : "Disable in published app"}
                         </button>
                       )}
+                      {!isProtectedCourse(course) && (
+                        <button type="button" role="menuitem" className="menu-item" onClick={() => setEditorMode("review")}><PenLine size={15} /> Check prompts</button>
+                      )}
                       <button type="button" role="menuitem" className="menu-item menu-item-danger" onClick={deleteCourse}><Trash2 size={15} /> Delete course</button>
                     </Menu>
                   </div>
@@ -1832,6 +1841,10 @@ function CoursesAdmin() {
                     </>
                   )}
 
+                  {editorMode === "review" && course && (
+                    <PromptReview course={course} onMakeInstruction={promptToInstructionFor} onOpen={editItem} />
+                  )}
+
                   {editorMode === "downloadable" && (
                     <>
                       <Field label="Unlocks after">
@@ -1942,12 +1955,18 @@ function CoursesAdmin() {
                 </div>
 
                 <div className="editor-footer">
+                  {editorMode === "review" ? (
+                    <button type="button" className="secondary-button" onClick={closeEditor}>Close</button>
+                  ) : (
+                  <>
                   <button className="primary-button" disabled={editor.disabled}>
                     {busy ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} {editor.save}
                   </button>
                   <button type="button" className="secondary-button" onClick={closeEditor}>Cancel</button>
                   {editorMode === "text" && promptDayHasPrompt && (
                     <button type="button" className="link-button" disabled={busy} onClick={promptToInstruction}>Make it an instruction</button>
+                  )}
+                  </>
                   )}
                 </div>
               </form>
@@ -1956,6 +1975,75 @@ function CoursesAdmin() {
         </div>
       )}
     </main>
+  );
+}
+
+/** The 21 Day Self Love course is never changed by the prompt check. */
+function isProtectedCourse(course: Course) {
+  return /self[\s-]*love/i.test(course.name || "") || /self[\s-]*love/i.test(course.courseId || "");
+}
+
+/**
+ * A suggestion only: a prompt asks the person to write, so it has a "Prompt" line or a question.
+ * Text without either reads as an instruction. The person checking decides.
+ */
+function promptSuggestion(text: string): { kind: "prompt" | "instruction"; reason: string } {
+  const plain = text.replace(/[*_]/g, "");
+  if (/^\s*#*\s*prompt\b/im.test(plain)) return { kind: "prompt", reason: "It has a “Prompt” line." };
+  if (plain.includes("?")) return { kind: "prompt", reason: "It asks a question to write about." };
+  return { kind: "instruction", reason: "It doesn't ask anything to write about." };
+}
+
+function plainExcerpt(text: string, length = 240) {
+  const plain = text
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
+    .replace(/^#+\s*/gm, "")
+    .replace(/[*_]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return plain.length > length ? `${plain.slice(0, length).trimEnd()}…` : plain;
+}
+
+function PromptReview({ course, onMakeInstruction, onOpen }: {
+  course: Course;
+  onMakeInstruction: (dayId: string) => void;
+  onOpen: (day: CourseDay, item: CourseDayItem) => void;
+}) {
+  if (isProtectedCourse(course)) {
+    return <p className="note">This course is left as it is.</p>;
+  }
+  const prompts = course.days.flatMap((day) => {
+    const prompt = day.items.find((item) => item.type === "prompt");
+    return prompt ? [{ day, prompt, suggestion: promptSuggestion(day.textContent || "") }] : [];
+  });
+  if (prompts.length === 0) {
+    return <p className="note">This course has no prompts.</p>;
+  }
+  const instructionCount = prompts.filter((entry) => entry.suggestion.kind === "instruction").length;
+  return (
+    <>
+      <p className="note">
+        {prompts.length} {prompts.length === 1 ? "prompt" : "prompts"} · {instructionCount} {instructionCount === 1 ? "looks" : "look"} like {instructionCount === 1 ? "an instruction" : "instructions"}.
+        Check each one: a prompt asks people to write; anything else is an instruction.
+      </p>
+      {prompts.map(({ day, prompt, suggestion }) => (
+        <div key={day.dayId} className="review-item">
+          <div className="review-head">
+            <span className="review-day">{dayLabel(day)}</span>
+            <span className={`kind-chip kind-${suggestion.kind}`}>{suggestion.kind === "prompt" ? "Looks like a prompt" : "Looks like an instruction"}</span>
+          </div>
+          <p className="review-title">{prompt.title}</p>
+          <p className="review-text">{plainExcerpt(day.textContent || "") || "No text yet."}</p>
+          <p className="hint">{suggestion.reason}</p>
+          <div className="review-actions">
+            <button type="button" className={suggestion.kind === "instruction" ? "primary-button" : "secondary-button"} onClick={() => onMakeInstruction(day.dayId)}>
+              Make it an instruction
+            </button>
+            <button type="button" className="secondary-button" onClick={() => onOpen(day, prompt)}>Open prompt</button>
+          </div>
+        </div>
+      ))}
+    </>
   );
 }
 

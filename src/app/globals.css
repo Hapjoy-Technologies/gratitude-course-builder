@@ -978,6 +978,53 @@ textarea.field-tall {
   font-weight: 800;
 }
 
+.review-item {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.review-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.review-day {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.review-title {
+  color: #222b27;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.review-text {
+  color: #3d4944;
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.review-actions .primary-button,
+.review-actions .secondary-button {
+  min-height: 2.1rem;
+  font-size: 0.8rem;
+}
+
 .sub-list {
   display: grid;
   gap: 4px;
