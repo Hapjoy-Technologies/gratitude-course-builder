@@ -1823,7 +1823,7 @@ function CoursesAdmin() {
                     <>
                       <DayField days={course?.days || []} value={instructionForm.dayId} onChange={(dayId) => setInstructionForm({ ...instructionForm, dayId })} />
                       <Field label="Title"><input className="field" value={instructionForm.title} onChange={(e) => setInstructionForm({ ...instructionForm, title: e.target.value })} placeholder="Print your kit" /></Field>
-                      <MarkdownField label="Text" value={instructionForm.description} onChange={(description) => setInstructionForm({ ...instructionForm, description })} placeholder={"Download the kit below, print it and cut out the pieces you love."} />
+                      <MarkdownField label="Text" headingLines value={instructionForm.description} onChange={(description) => setInstructionForm({ ...instructionForm, description })} placeholder={"Download the kit below, print it and cut out the pieces you love."} />
                       <Toggle checked={instructionForm.requiredForCompletion} onChange={(checked) => setInstructionForm({ ...instructionForm, requiredForCompletion: checked })} />
                       <Advanced>
                         <Field label="Order"><input type="number" className="field" value={instructionForm.order} onChange={(e) => setInstructionForm({ ...instructionForm, order: Number(e.target.value) })} /></Field>
@@ -2088,11 +2088,13 @@ function DayField({ days, value, onChange }: { days: CourseDay[]; value: string;
   );
 }
 
-function MarkdownField({ label, value, onChange, placeholder }: {
+function MarkdownField({ label, value, onChange, placeholder, headingLines = false }: {
   label: string;
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
+  /** Show each heading line on its own, as the app does for instructions. */
+  headingLines?: boolean;
 }) {
   const [preview, setPreview] = useState(false);
   return (
@@ -2105,13 +2107,29 @@ function MarkdownField({ label, value, onChange, placeholder }: {
         </span>
       </span>
       {preview ? (
-        <div className="md-preview">{value.trim() ? renderMarkdown(value) : <p className="hint">Nothing to preview yet.</p>}</div>
+        <div className="md-preview">{value.trim() ? renderMarkdown(headingLines ? separateHeadingLines(value) : value) : <p className="hint">Nothing to preview yet.</p>}</div>
       ) : (
         <textarea className="field field-tall" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
       )}
       <span className="hint">## Heading · ###### Small note · **bold** · *italic* · [link](https://…)</span>
     </div>
   );
+}
+
+/**
+ * Puts each heading line in a block of its own, as the app does for instructions, so a heading
+ * written right above its text isn't merged with it. "######" stays a small note; "#" to "#####"
+ * become "##".
+ */
+function separateHeadingLines(text: string) {
+  return text
+    .split("\n")
+    .map((line) => {
+      const heading = line.trim().match(/^(#{1,6})\s+(\S.*)$/);
+      if (!heading) return line;
+      return heading[1].length === 6 ? `\n###### ${heading[2]}\n` : `\n## ${heading[2]}\n`;
+    })
+    .join("\n");
 }
 
 /** A preview close to how the app shows course text: blocks split by blank lines. */
