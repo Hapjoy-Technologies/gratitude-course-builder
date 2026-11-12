@@ -1,24 +1,28 @@
 "use client";
 
-import { DragEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import { DragEvent, FormEvent, ReactNode, useEffect, useRef, useState } from "react";
 import {
   BookOpen,
   CheckCircle2,
   ChevronDown,
-  Download,
-  FileText,
+  CircleAlert,
+  Ellipsis,
+  Gift,
   GripVertical,
+  KeyRound,
   Loader2,
   Lock,
+  PenLine,
   Pencil,
   Plus,
   Power,
   RefreshCw,
+  Rocket,
   Save,
   ShieldAlert,
   Trash2,
-  Upload,
   Video,
+  X,
 } from "lucide-react";
 import { Upload as TusUpload } from "tus-js-client";
 import type { ApiEnvelope, Course, CourseDay, CourseDayItem, CourseDownloadable, CourseDownloadableItem, CourseSummary } from "@/lib/types";
@@ -67,6 +71,15 @@ const emptyPromptForm = {
   order: 99,
   textContent: "",
   contentFormat: "markdown",
+  requiredForCompletion: true,
+};
+
+const emptyInstructionForm = {
+  dayId: "day-1",
+  itemId: "",
+  title: "",
+  order: 1,
+  description: "",
   requiredForCompletion: true,
 };
 
@@ -271,12 +284,6 @@ function downloadableDayOptions(course: Course | null, currentUnlockAfter = "") 
   return options;
 }
 
-function downloadableUnlockLabel(unlockAfter: string, days: CourseDay[]) {
-  const day = days.find((item) => item.dayId === unlockAfter);
-  if (day) return `${day.title || `Day ${day.dayNumber}`} reward`;
-  return unlockAfter === "course" ? "Course completion reward" : `${unlockAfter} reward`;
-}
-
 function downloadableUnlockRank(unlockAfter: string, days: CourseDay[]) {
   const day = days.find((item) => item.dayId === unlockAfter);
   if (day) return day.dayNumber;
@@ -360,7 +367,7 @@ function findCourseDayItem(course: Course | null, dayId: string, itemId: string,
   }) || null;
 }
 
-type EditorMode = "course" | "day" | "video" | "text" | "downloadable";
+type EditorMode = "course" | "day" | "video" | "text" | "instruction" | "downloadable";
 
 export default function Home() {
   return <CoursesAdmin />;
@@ -382,21 +389,33 @@ function CoursesAdmin() {
   const [dayForm, setDayForm] = useState(emptyDayForm);
   const [itemForm, setItemForm] = useState(emptyItemForm);
   const [promptForm, setPromptForm] = useState(emptyPromptForm);
+  const [instructionForm, setInstructionForm] = useState(emptyInstructionForm);
   const [downloadableForm, setDownloadableForm] = useState(emptyDownloadableForm);
   const [thumbnailFile, setThumbnailFile] = useState<File | null>(null);
   const [videoFile, setVideoFile] = useState<File | null>(null);
   const [downloadableFiles, setDownloadableFiles] = useState<File[]>([]);
-  const [editorMode, setEditorMode] = useState<EditorMode>("course");
+  // What the editor panel shows; null keeps it closed until a lesson, day or action is picked.
+  const [editorMode, setEditorMode] = useState<EditorMode | null>(null);
   const [isCreatingCourse, setIsCreatingCourse] = useState(false);
+  const [dayIsNew, setDayIsNew] = useState(false);
   const [busy, setBusy] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [message, setMessage] = useState("Ready");
-  const [orderToast, setOrderToast] = useState<{ id: number; text: string } | null>(null);
-
-  const selectedDay = useMemo(() => {
-    if (!course) return null;
-    return findCourseDay(course, itemForm.dayId) || courseDays(course)[0] || null;
-  }, [course, itemForm.dayId]);
+  const [orderToast, setOrderToast] = useState<{ id: number; text: string; tone?: "ok" | "error" } | null>(null);
+  // Sync status shown in the header: saves so far, a quiet background refresh, or the last error.
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [lastError, setLastError] = useState<string | null>(null);
+  const [syncCount, setSyncCount] = useState(0);
+  const [loadingCourseId, setLoadingCourseId] = useState<string | null>(null);
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [tokenOpen, setTokenOpen] = useState(false);
+  // Each course's state in the published app (production API): true when disabled there. A course
+  // missing from the map hasn't been promoted yet; null until production has been checked.
+  const [publishedDisabled, setPublishedDisabled] = useState<Record<string, boolean> | null>(null);
+  const [publishedError, setPublishedError] = useState<string | null>(null);
+  // Courses already opened, so switching back is instant; each is refreshed in the background.
+  const courseCache = useRef(new Map<string, Course>());
+  const refreshSeq = useRef(0);
 
   useEffect(() => {
     if (typeof window !== "undefined") {
@@ -413,35 +432,50 @@ function CoursesAdmin() {
 
   useEffect(() => {
     if (!orderToast) return;
-    const timeout = window.setTimeout(() => setOrderToast(null), 2200);
+    const timeout = window.setTimeout(() => setOrderToast(null), orderToast.tone === "error" ? 5000 : 2200);
     return () => window.clearTimeout(timeout);
   }, [orderToast]);
 
   useEffect(() => {
-    if (!isUnlocked) return;
+    if (!isUnlocked || !PROD_API_BASE || !token) return;
     let cancelled = false;
-    setInitialLoading(true);
-    setMessage("Loading courses");
-    apiRequest<{ courses: CourseSummary[] }>("/v1/courses/admin", token)
+    productionApiRequest<{ courses: CourseSummary[] }>("/v1/courses/admin", token)
       .then((data) => {
         if (cancelled) return;
-        const nextCourses = data.courses || [];
-        setCourses(nextCourses);
-        if (!selectedCourseId && nextCourses[0]) {
-          return loadCourse(nextCourses[0].courseId);
-        }
-        setMessage("Ready");
+        setPublishedDisabled(Object.fromEntries((data.courses || []).map((item) => [item.courseId, Boolean(item.disabled)])));
+        setPublishedError(null);
       })
       .catch((error) => {
-        if (!cancelled) setMessage(error instanceof Error ? error.message : "Failed to load courses");
-      })
-      .finally(() => {
-        if (!cancelled) setInitialLoading(false);
+        if (!cancelled) setPublishedError(error instanceof Error ? error.message : "Could not check the published app");
       });
     return () => {
       cancelled = true;
     };
-  }, [isUnlocked]);
+  }, [isUnlocked, token]);
+
+  // Menus close on an outside click; Escape closes a menu, then the editor.
+  useEffect(() => {
+    const onPointerDown = (event: PointerEvent) => {
+      if (!(event.target as HTMLElement).closest("[data-menu]")) setOpenMenu(null);
+      if (!(event.target as HTMLElement).closest("[data-token]")) setTokenOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (document.querySelector('[data-menu] [aria-expanded="true"], [data-token] [aria-expanded="true"]')) {
+        setOpenMenu(null);
+        setTokenOpen(false);
+      } else {
+        setEditorMode(null);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
 
   function handleUnlock(event: FormEvent) {
     event.preventDefault();
@@ -470,12 +504,15 @@ function CoursesAdmin() {
   async function run(label: string, action: () => Promise<void>, successToast?: string) {
     setBusy(true);
     setMessage(label);
+    setLastError(null);
     try {
       await action();
-      setMessage(`${label} done`);
-      if (successToast) setOrderToast({ id: Date.now(), text: successToast });
+      setSavedAt((count) => (count || 0) + 1);
+      if (successToast) setOrderToast((current) => ({ id: (current?.id || 0) + 1, text: successToast }));
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Something failed");
+      const text = error instanceof Error ? error.message : "Something failed";
+      setLastError(text);
+      setOrderToast((current) => ({ id: (current?.id || 0) + 1, text, tone: "error" }));
     } finally {
       setBusy(false);
     }
@@ -494,6 +531,7 @@ function CoursesAdmin() {
     setIsCreatingCourse(false);
     setSelectedCourseId(courseId);
     const data = await apiRequest<{ course: Course }>(`/v1/courses/${courseId}/admin`, token);
+    courseCache.current.set(courseId, data.course);
     setCourse(data.course);
     setCourseForm({
       order: data.course.order ?? 0,
@@ -504,7 +542,7 @@ function CoursesAdmin() {
       isPaid: data.course.isPaid || false,
       thumbnailUrl: data.course.thumbnailUrl || "",
     });
-    setEditorMode("course");
+    setEditorMode(null);
     const firstDay = data.course.days[0];
     if (firstDay) {
       setDayForm({
@@ -527,7 +565,133 @@ function CoursesAdmin() {
     }
   }
 
+  useEffect(() => {
+    if (!isUnlocked) return;
+    let cancelled = false;
+    setInitialLoading(true);
+    setMessage("Loading courses");
+    apiRequest<{ courses: CourseSummary[] }>("/v1/courses/admin", token)
+      .then((data) => {
+        if (cancelled) return;
+        const nextCourses = data.courses || [];
+        setCourses(nextCourses);
+        if (!selectedCourseId && nextCourses[0]) {
+          return loadCourse(nextCourses[0].courseId);
+        }
+        setMessage("Ready");
+      })
+      .catch((error) => {
+        if (!cancelled) setLastError(error instanceof Error ? error.message : "Failed to load courses");
+      })
+      .finally(() => {
+        if (!cancelled) setInitialLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isUnlocked]);
+
+  /**
+   * Reloads a course quietly after a save, without closing the editor or moving the page. Only the
+   * newest refresh is applied, so a slow older one can't undo a newer change.
+   */
+  async function refreshCourse(courseId: string) {
+    const seq = ++refreshSeq.current;
+    setSyncCount((count) => count + 1);
+    try {
+      const data = await apiRequest<{ course: Course }>(`/v1/courses/${courseId}/admin`, token);
+      courseCache.current.set(courseId, data.course);
+      if (seq === refreshSeq.current) {
+        setCourse((current) => (current?.courseId === courseId ? data.course : current));
+      }
+    } catch (error) {
+      setLastError(error instanceof Error ? error.message : "Could not refresh the course");
+    } finally {
+      setSyncCount((count) => count - 1);
+    }
+  }
+
+  async function refreshCourseList() {
+    setSyncCount((count) => count + 1);
+    try {
+      const data = await apiRequest<{ courses: CourseSummary[] }>("/v1/courses/admin", token);
+      setCourses(data.courses || []);
+    } catch (error) {
+      setLastError(error instanceof Error ? error.message : "Could not refresh the courses");
+    } finally {
+      setSyncCount((count) => count - 1);
+    }
+  }
+
+  function refreshAll() {
+    setLastError(null);
+    void refreshCourseList();
+    if (course) void refreshCourse(course.courseId);
+  }
+
+  /** Shows a saved change straight away; the background refresh then confirms it. */
+  function patchCourse(update: (current: Course) => Course) {
+    setCourse((current) => {
+      if (!current) return current;
+      const next = update(current);
+      courseCache.current.set(next.courseId, next);
+      return next;
+    });
+  }
+
+  function patchDay(dayId: string, update: (day: CourseDay) => CourseDay) {
+    const replace = (day: CourseDay) => (day.dayId === dayId ? update(day) : day);
+    patchCourse((current) => ({ ...current, days: current.days.map(replace), introVideos: current.introVideos?.map(replace) }));
+  }
+
+  /** Puts a saved item in a day's list. A new item has a temporary id until the refresh brings the real one. */
+  function upsertLocalItem(items: CourseDayItem[], item: CourseDayItem) {
+    const exists = items.some((candidate) => candidate.itemId === item.itemId);
+    const next = exists
+      ? items.map((candidate) => (candidate.itemId === item.itemId ? item : candidate))
+      : [...items, item];
+    return sortItems(next);
+  }
+
+  function closeEditor() {
+    setEditorMode(null);
+  }
+
+  async function openCourse(courseId: string) {
+    if (courseId === selectedCourseId && course) return;
+    setEditorMode(null);
+    setOpenMenu(null);
+    const cached = courseCache.current.get(courseId);
+    if (cached) {
+      setIsCreatingCourse(false);
+      setSelectedCourseId(courseId);
+      setCourse(cached);
+      void refreshCourse(courseId);
+      return;
+    }
+    setLoadingCourseId(courseId);
+    try {
+      await loadCourse(courseId);
+    } catch (error) {
+      setLastError(error instanceof Error ? error.message : "Could not open the course");
+    } finally {
+      setLoadingCourseId(null);
+    }
+  }
+
   function editCourse() {
+    if (course) {
+      setCourseForm({
+        order: course.order ?? 0,
+        name: course.name || "",
+        description: course.description || "",
+        authorId: course.authorId || "gratitude",
+        authorName: course.authorName || course.authorId || "Gratitude",
+        isPaid: course.isPaid || false,
+        thumbnailUrl: course.thumbnailUrl || "",
+      });
+      setThumbnailFile(null);
+    }
     setEditorMode("course");
   }
 
@@ -559,6 +723,7 @@ function CoursesAdmin() {
     });
     setPromptForm((value) => ({ ...value, dayId: day.dayId, textContent: day.textContent || "" }));
     setItemForm((value) => ({ ...value, dayId: day.dayId, order: (day.items?.length || 0) + 1 }));
+    setDayIsNew(false);
     setEditorMode("day");
   }
 
@@ -572,12 +737,6 @@ function CoursesAdmin() {
     setEditorMode("video");
   }
 
-  function addIntroVideo() {
-    if (!course) return;
-    const introDay = course.introVideos?.[0] || defaultIntroDay(course);
-    addVideoToDay(introDay);
-  }
-
   function addDay() {
     if (!course) return;
     const dayNumber = Math.max(0, ...course.days.map((day) => day.dayNumber)) + 1;
@@ -587,6 +746,7 @@ function CoursesAdmin() {
       dayNumber,
       title: `Day ${dayNumber}`,
     });
+    setDayIsNew(true);
     setEditorMode("day");
   }
 
@@ -602,7 +762,7 @@ function CoursesAdmin() {
           body: JSON.stringify({ courses: next.map((item) => ({ courseId: item.courseId, order: item.order })) }),
         });
       } finally {
-        await loadCourses();
+        void refreshCourseList();
       }
     }, "Course order updated");
   }
@@ -620,7 +780,7 @@ function CoursesAdmin() {
           body: JSON.stringify({ days: nextDays.map((day) => ({ dayId: day.dayId, dayNumber: day.dayNumber })) }),
         });
       } finally {
-        await loadCourse(course.courseId);
+        void refreshCourse(course.courseId);
       }
     }, "Day order updated");
   }
@@ -640,7 +800,7 @@ function CoursesAdmin() {
           body: JSON.stringify({ items: nextItems.map((item) => ({ dayId, itemId: item.itemId, order: item.order })) }),
         });
       } finally {
-        await loadCourse(course.courseId);
+        void refreshCourse(course.courseId);
       }
     }, "Content order updated");
   }
@@ -659,7 +819,7 @@ function CoursesAdmin() {
           body: JSON.stringify({ downloadables: moved.map((item) => ({ assetId: item.assetId, order: item.order })) }),
         });
       } finally {
-        await loadCourse(course.courseId);
+        void refreshCourse(course.courseId);
       }
     }, "Reward order updated");
   }
@@ -678,7 +838,7 @@ function CoursesAdmin() {
           body: JSON.stringify({ downloadableItems: nextItems.map((item) => ({ parentAssetId, assetId: item.assetId, order: item.order })) }),
         });
       } finally {
-        await loadCourse(course.courseId);
+        void refreshCourse(course.courseId);
       }
     }, "Playlist order updated");
   }
@@ -694,6 +854,18 @@ function CoursesAdmin() {
         requiredForCompletion: item.requiredForCompletion,
       });
       setEditorMode("text");
+      return;
+    }
+    if (item.type === "instruction") {
+      setInstructionForm({
+        dayId: day.dayId,
+        itemId: item.itemId,
+        title: item.title,
+        order: item.order || nextItemOrder(day.items),
+        description: item.description || "",
+        requiredForCompletion: item.requiredForCompletion,
+      });
+      setEditorMode("instruction");
       return;
     }
 
@@ -721,6 +893,32 @@ function CoursesAdmin() {
       contentFormat: day.contentFormat || "markdown",
     });
     setEditorMode("text");
+  }
+
+  function addInstructionToDay(day: CourseDay) {
+    setInstructionForm({
+      ...emptyInstructionForm,
+      dayId: day.dayId,
+      order: nextItemOrder(day.items),
+    });
+    setEditorMode("instruction");
+  }
+
+  // Moves the day's prompt into the instruction form. Saving it turns that prompt into an instruction
+  // in place (same item id, so people's progress is kept) and clears the day's prompt text.
+  function promptToInstruction() {
+    const day = findCourseDay(course, promptForm.dayId);
+    const prompt = day?.items.find((item) => item.type === "prompt");
+    if (!day || !prompt) return;
+    setInstructionForm({
+      dayId: day.dayId,
+      itemId: prompt.itemId,
+      title: prompt.title === "Prompt for today" ? "" : prompt.title,
+      order: prompt.order,
+      description: day.textContent || "",
+      requiredForCompletion: prompt.requiredForCompletion,
+    });
+    setEditorMode("instruction");
   }
 
   function addDownloadableToDay(day: CourseDay) {
@@ -797,32 +995,72 @@ function CoursesAdmin() {
         body: JSON.stringify(nextCourse),
       });
       setThumbnailFile(null);
-      await loadCourse(course.courseId);
-      await loadCourses();
+      patchCourse((current) => ({ ...current, ...nextCourse }));
+      setCourses((current) => current.map((item) => (item.courseId === course.courseId ? { ...item, name: nextCourse.name, isPaid: nextCourse.isPaid, order: nextCourse.order } : item)));
+      setEditorMode(null);
+      void refreshCourse(course.courseId);
+      void refreshCourseList();
     });
   }
 
   async function deleteCourse() {
-    if (!course || !confirm(`Delete ${course.name} from DynamoDB?`)) return;
+    if (!course || !confirm(`Delete the course “${course.name}”? This can't be undone.`)) return;
     await run("Deleting course", async () => {
       await apiRequest(`/v1/courses/${course.courseId}`, token, { method: "DELETE" });
+      courseCache.current.delete(course.courseId);
       setCourse(null);
       setSelectedCourseId("");
+      setEditorMode(null);
       await loadCourses();
     });
+  }
+
+  /** Reads which courses are in the published app and whether they're disabled there. */
+  async function loadPublishedStatus() {
+    if (!PROD_API_BASE || !token) return;
+    try {
+      const data = await productionApiRequest<{ courses: CourseSummary[] }>("/v1/courses/admin", token);
+      setPublishedDisabled(Object.fromEntries((data.courses || []).map((item) => [item.courseId, Boolean(item.disabled)])));
+      setPublishedError(null);
+    } catch (error) {
+      setPublishedError(error instanceof Error ? error.message : "Could not check the published app");
+    }
+  }
+
+  /**
+   * Disables or enables the course in the published app only, with the production API's own course
+   * update. The debug app (development) and everything else about the course stay as they are.
+   */
+  async function togglePublishedDisabled() {
+    if (!course || !publishedDisabled || !(course.courseId in publishedDisabled)) return;
+    const nextDisabled = !publishedDisabled[course.courseId];
+    const question = nextDisabled
+      ? `Disable “${course.name}” in the published app? People won't see it until you enable it again.`
+      : `Enable “${course.name}” in the published app?`;
+    if (!confirm(question)) return;
+    await run(nextDisabled ? "Disabling in the published app" : "Enabling in the published app", async () => {
+      await productionApiRequest(`/v1/courses/${course.courseId}`, token, {
+        method: "PUT",
+        body: JSON.stringify({ disabled: nextDisabled }),
+      });
+      setPublishedDisabled((current) => ({ ...(current || {}), [course.courseId]: nextDisabled }));
+      void loadPublishedStatus();
+    }, nextDisabled ? "Disabled in the published app" : "Enabled in the published app");
   }
 
   async function toggleCourseDisabled() {
     if (!course) return;
     const nextDisabled = !course.disabled;
-    await run(nextDisabled ? "Disabling course" : "Enabling course", async () => {
+    await run(nextDisabled ? "Disabling in the debug app" : "Enabling in the debug app", async () => {
       await apiRequest(`/v1/courses/${course.courseId}`, token, {
         method: "PUT",
         body: JSON.stringify({ disabled: nextDisabled }),
       });
-      await loadCourse(course.courseId);
-      await loadCourses();
-    });
+      patchCourse((current) => ({ ...current, disabled: nextDisabled }));
+      setCourses((current) => current.map((item) => (item.courseId === course.courseId ? { ...item, disabled: nextDisabled } : item)));
+      void refreshCourse(course.courseId);
+      void refreshCourseList();
+    }, nextDisabled ? "Disabled in the debug app" : "Enabled in the debug app");
   }
 
   async function promoteCourse() {
@@ -844,6 +1082,7 @@ function CoursesAdmin() {
         body: JSON.stringify({ apply: true, confirmation }),
       });
       setOrderToast({ id: Date.now(), text: `Promoted to production: ${result.objectsCopied} assets copied` });
+      void loadPublishedStatus();
     });
   }
 
@@ -865,7 +1104,13 @@ function CoursesAdmin() {
         method: "PUT",
         body: JSON.stringify(nextDay),
       });
-      await loadCourse(course.courseId);
+      if (existingDay) {
+        patchDay(nextDay.dayId, (day) => ({ ...day, ...nextDay }));
+      } else {
+        patchCourse((current) => ({ ...current, days: [...current.days, { ...nextDay, courseId: current.courseId, items: [] }] }));
+      }
+      setEditorMode(null);
+      void refreshCourse(course.courseId);
     });
   }
 
@@ -948,27 +1193,39 @@ function CoursesAdmin() {
       });
       setDownloadableForm(emptyDownloadableForm);
       setDownloadableFiles([]);
-      await loadCourse(course.courseId);
+      patchCourse((current) => ({ ...current, downloadables: mergedDownloadables }));
+      setEditorMode(null);
+      void refreshCourse(course.courseId);
     });
   }
 
   async function deleteDownloadable(assetId: string) {
-    if (!course || !confirm(`Remove downloadable ${assetId} from this course?`)) return;
+    const title = findCourseDownloadable(course, assetId)?.title || assetId;
+    if (!course || !confirm(`Remove the reward “${title}” from this course?`)) return;
     await run("Deleting downloadable", async () => {
       const nextDownloadables = (course.downloadables || []).filter((item) => item.assetId !== assetId);
       await apiRequest(`/v1/courses/${course.courseId}`, token, {
         method: "PUT",
         body: JSON.stringify({ downloadables: nextDownloadables }),
       });
-      await loadCourse(course.courseId);
+      patchCourse((current) => ({ ...current, downloadables: nextDownloadables }));
+      setEditorMode(null);
+      void refreshCourse(course.courseId);
     });
   }
 
   async function deleteDay(dayId: string) {
-    if (!course || !confirm(`Delete ${dayId}?`)) return;
+    const day = findCourseDay(course, dayId);
+    if (!course || !confirm(`Delete “${day?.title || dayId}” and all its lessons? This can't be undone.`)) return;
     await run("Deleting day", async () => {
       await apiRequest(`/v1/courses/${course.courseId}/days/${dayId}`, token, { method: "DELETE" });
-      await loadCourse(course.courseId);
+      patchCourse((current) => ({
+        ...current,
+        days: current.days.filter((candidate) => candidate.dayId !== dayId),
+        introVideos: current.introVideos?.filter((candidate) => candidate.dayId !== dayId),
+      }));
+      setEditorMode(null);
+      void refreshCourse(course.courseId);
     });
   }
 
@@ -1032,15 +1289,61 @@ function CoursesAdmin() {
       });
       setItemForm(emptyItemForm);
       setVideoFile(null);
-      await loadCourse(course.courseId);
+      const { dayId: savedDayId, ...savedItem } = nextItem;
+      const localItem = { ...savedItem, itemId: savedItem.itemId || `pending-${Date.now()}` };
+      patchDay(savedDayId, (day) => ({ ...day, items: upsertLocalItem(day.items, localItem) }));
+      setEditorMode(null);
+      void refreshCourse(course.courseId);
     });
   }
 
   async function deleteItem(dayId: string, itemId: string) {
-    if (!course || !confirm(`Delete ${itemId}?`)) return;
+    const title = findCourseDayItem(course, dayId, itemId)?.title || itemId;
+    if (!course || !confirm(`Delete the lesson “${title}”? This can't be undone.`)) return;
     await run("Deleting item", async () => {
       await apiRequest(`/v1/courses/${course.courseId}/days/${dayId}/items/${itemId}`, token, { method: "DELETE" });
-      await loadCourse(course.courseId);
+      patchDay(dayId, (day) => ({ ...day, items: day.items.filter((item) => item.itemId !== itemId) }));
+      setEditorMode(null);
+      void refreshCourse(course.courseId);
+    });
+  }
+
+  async function saveInstruction(event: FormEvent) {
+    event.preventDefault();
+    if (!course) return;
+    await run("Saving instruction", async () => {
+      const existingDay = findCourseDay(course, instructionForm.dayId);
+      await apiRequest(`/v1/courses/${course.courseId}/items`, token, {
+        method: "PUT",
+        body: JSON.stringify({
+          items: [{
+            dayId: instructionForm.dayId,
+            itemId: instructionForm.itemId.trim(),
+            type: "instruction",
+            order: Number(instructionForm.order) || nextItemOrder(existingDay?.items || []),
+            title: instructionForm.title.trim(),
+            description: instructionForm.description.trim(),
+            requiredForCompletion: instructionForm.requiredForCompletion,
+          }],
+        }),
+      });
+      const convertsPrompt = existingDay?.items.some((item) => item.itemId === instructionForm.itemId.trim() && item.type === "prompt");
+      const localItemId = instructionForm.itemId.trim() || `pending-${Date.now()}`;
+      patchDay(instructionForm.dayId, (day) => ({
+        ...day,
+        textContent: convertsPrompt ? "" : day.textContent,
+        items: upsertLocalItem(day.items, {
+          itemId: localItemId,
+          type: "instruction",
+          order: Number(instructionForm.order) || nextItemOrder(day.items),
+          title: instructionForm.title.trim(),
+          description: instructionForm.description.trim(),
+          requiredForCompletion: instructionForm.requiredForCompletion,
+        }),
+      }));
+      setInstructionForm(emptyInstructionForm);
+      setEditorMode(null);
+      void refreshCourse(course.courseId);
     });
   }
 
@@ -1062,26 +1365,127 @@ function CoursesAdmin() {
         method: "PUT",
         body: JSON.stringify(nextPrompt),
       });
-      await loadCourse(course.courseId);
+      patchDay(nextPrompt.dayId, (day) => ({
+        ...day,
+        textContent: nextPrompt.textContent,
+        contentFormat: nextPrompt.contentFormat,
+        items: upsertLocalItem(day.items, {
+          itemId: existingPrompt?.itemId || `${nextPrompt.dayId}-prompt`,
+          type: "prompt",
+          order: nextPrompt.order,
+          title: nextPrompt.title,
+          requiredForCompletion: nextPrompt.requiredForCompletion,
+        }),
+      }));
+      setEditorMode(null);
+      void refreshCourse(course.courseId);
     });
   }
 
+  const syncing = syncCount > 0;
+  const allDays = course ? courseDays(course) : [];
+  const dayIds = new Set(allDays.map((day) => day.dayId));
+  const courseRewards = (course?.downloadables || [])
+    .filter((item) => !dayIds.has(item.unlockAfter))
+    .sort((a, b) => a.order - b.order || a.assetId.localeCompare(b.assetId));
+  const promptDayHasPrompt = Boolean(findCourseDay(course, promptForm.dayId)?.items.some((item) => item.type === "prompt"));
+  const convertingPrompt = findCourseDayItem(course, instructionForm.dayId, instructionForm.itemId)?.type === "prompt";
+  const isLinkReward = ["spotify", "external_link"].includes(downloadableForm.type);
+  const tokenChip = !token ? "Add sign-in token" : tokenStatus?.tone === "ok" ? "Signed in" : "Check token";
+  const publishedState: "unknown" | "missing" | "disabled" | "enabled" =
+    !course || !publishedDisabled ? "unknown" :
+    !(course.courseId in publishedDisabled) ? "missing" :
+    publishedDisabled[course.courseId] ? "disabled" : "enabled";
+  const publishedLabel = { unknown: publishedError ? "Couldn't check" : token ? "Checking…" : "Add token to check", missing: "Not promoted yet", disabled: "Disabled", enabled: "Enabled" }[publishedState];
+  const publishedPillClass = publishedState === "enabled" ? "status-pill-enabled" : publishedState === "disabled" ? "status-pill-off" : "status-pill-disabled";
+
+  // The lesson or reward the editor is open on, highlighted in the list.
+  const activeKey =
+    editorMode === "video" && itemForm.itemId ? `${itemForm.dayId}:${itemForm.itemId}` :
+    editorMode === "instruction" && instructionForm.itemId ? `${instructionForm.dayId}:${instructionForm.itemId}` :
+    editorMode === "text" ? `${promptForm.dayId}:prompt` :
+    editorMode === "downloadable" && downloadableForm.assetId ? `reward:${downloadableForm.assetId}` :
+    editorMode === "day" && !dayIsNew ? `day:${dayForm.dayId}` : "";
+
+  const editor = (() => {
+    const dayText = (dayId: string) => {
+      const day = findCourseDay(course, dayId);
+      return day ? dayLabel(day) : dayId;
+    };
+    switch (editorMode) {
+      case "course":
+        return { kind: "course", icon: <BookOpen size={17} />, title: course ? "Course details" : "New course", context: course?.name || "Fill in the details, then create it", save: course ? "Save details" : "Create course", disabled: busy || !courseForm.name.trim() };
+      case "day":
+        return { kind: "day", icon: <Pencil size={17} />, title: dayIsNew ? "New day" : "Edit day", context: dayIsNew ? course?.name || "" : dayText(dayForm.dayId), save: dayIsNew ? "Add day" : "Save day", disabled: !course || busy };
+      case "video":
+        return { kind: "video", icon: <Video size={17} />, title: itemForm.itemId ? "Edit video" : "New video", context: dayText(itemForm.dayId), save: "Save video", disabled: !course || busy };
+      case "text":
+        return { kind: "prompt", icon: <PenLine size={17} />, title: promptDayHasPrompt ? "Edit prompt" : "New prompt", context: dayText(promptForm.dayId), save: "Save prompt", disabled: !course || busy };
+      case "instruction":
+        return { kind: "instruction", icon: <BookOpen size={17} />, title: convertingPrompt ? "Make it an instruction" : instructionForm.itemId ? "Edit instruction" : "New instruction", context: dayText(instructionForm.dayId), save: "Save instruction", disabled: !course || busy || !instructionForm.title.trim() || !instructionForm.description.trim() };
+      case "downloadable":
+        return { kind: "reward", icon: <Gift size={17} />, title: downloadableForm.assetId ? "Edit reward" : "New reward", context: downloadableForm.unlockAfter === "course" ? "Course reward" : `Unlocks after ${dayText(downloadableForm.unlockAfter)}`, save: "Save reward", disabled: !course || busy };
+      default:
+        return null;
+    }
+  })();
+
+  function submitEditor(event: FormEvent) {
+    switch (editorMode) {
+      case "course": return course ? saveCourse(event) : createCourse(event);
+      case "day": return saveDay(event);
+      case "video": return saveItem(event);
+      case "text": return savePrompt(event);
+      case "instruction": return saveInstruction(event);
+      case "downloadable": return saveDownloadable(event);
+      default: event.preventDefault();
+    }
+  }
+
+
   return (
     <main className="min-h-screen">
-      <header className="app-header sticky top-0 z-20">
-        <div className="flex h-16 items-center justify-between px-6">
-          <div className="flex items-center gap-3">
-            <div className="brand-mark"><BookOpen size={19} /></div>
-            <div>
-              <h1 className="text-lg font-semibold">Course Operations</h1>
-              <p className="text-xs text-[#6b7280]">Internal course operations</p>
+      <header className="app-header">
+        <div className="app-header-inner">
+          <div className="brand">
+            <div className="brand-mark"><BookOpen size={18} /></div>
+            <div className="brand-text">
+              <h1>Course Builder</h1>
+              <p>Gratitude app courses</p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="header-actions">
             {isUnlocked && (
               <>
-                <button onClick={() => run("Loading courses", loadCourses)} className="icon-button" title="Refresh courses"><RefreshCw size={17} /></button>
-                <button onClick={handleLock} className="secondary-button" title="Lock course operations"><Lock size={15} /> Lock</button>
+                <SyncStatus busy={busy} message={message} syncing={syncing} lastError={lastError} savedAt={savedAt} />
+                <div className="token-wrap" data-token>
+                  <button
+                    type="button"
+                    className={`token-chip token-${token ? tokenStatus?.tone || "warn" : "none"}`}
+                    onClick={() => setTokenOpen((open) => !open)}
+                    aria-expanded={tokenOpen}
+                    title={tokenStatus?.text || "Paste a sign-in token to save changes"}
+                  >
+                    <KeyRound size={15} />
+                    <span>{tokenChip}</span>
+                  </button>
+                  {tokenOpen && (
+                    <div className="token-popover">
+                      <label className="label">
+                        Sign-in token
+                        <textarea value={token} onChange={(e) => setToken(normalizeToken(e.target.value))} className="field min-h-24 font-mono text-xs" placeholder="Paste the Firebase ID token from your @gratefulness.me Google sign-in" />
+                      </label>
+                      {tokenStatus && <p className={`token-status ${tokenStatus.tone === "ok" ? "text-emerald-700" : "text-amber-700"}`}>{tokenStatus.text}</p>}
+                      <p className="hint">Needed to save changes and to promote. Tokens last about an hour.</p>
+                    </div>
+                  )}
+                </div>
+                <button type="button" onClick={refreshAll} className="icon-button" title="Refresh" aria-label="Refresh">
+                  <RefreshCw size={16} className={syncing ? "animate-spin" : ""} />
+                </button>
+                <button type="button" onClick={handleLock} className="icon-button" title="Lock" aria-label="Lock">
+                  <Lock size={16} />
+                </button>
               </>
             )}
             <span className="environment-badge">Dev</span>
@@ -1090,14 +1494,14 @@ function CoursesAdmin() {
       </header>
 
       {orderToast && (
-        <div key={orderToast.id} className="order-toast" role="status" aria-live="polite">
-          <CheckCircle2 size={16} />
+        <div key={orderToast.id} className={`order-toast ${orderToast.tone === "error" ? "order-toast-error" : ""}`} role="status" aria-live="polite">
+          {orderToast.tone === "error" ? <CircleAlert size={16} /> : <CheckCircle2 size={16} />}
           {orderToast.text}
         </div>
       )}
 
       {!isUnlocked ? (
-        <div className="flex min-h-[calc(100vh-64px)] items-center justify-center p-6 bg-[#f5f7f5]">
+        <div className="flex min-h-[calc(100vh-60px)] items-center justify-center p-6 bg-[#f5f7f5]">
           <div className="w-full max-w-md rounded-xl border border-[#dce5e0] bg-white p-8 shadow-xl">
             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-[#fde9ed] text-[#df5c79]">
               <Lock size={28} />
@@ -1136,27 +1540,17 @@ function CoursesAdmin() {
           </div>
         </div>
       ) : (
-        <div className="course-workspace">
+        <div className={`course-workspace ${editorMode ? "editor-open" : ""}`}>
           <aside className="course-sidebar" aria-label="Courses">
-            <details className="connection-settings">
-              <summary>Backend authentication</summary>
-              <label className="label mt-3">Admin token
-                <textarea value={token} onChange={(e) => setToken(normalizeToken(e.target.value))} className="field min-h-20 font-mono text-xs" placeholder="Paste the Firebase ID token from your @gratefulness.me Google sign-in (needed for Promote)" />
-              </label>
-              {tokenStatus && (
-                <p className={`mt-2 text-xs ${tokenStatus.tone === "ok" ? "text-emerald-700" : "text-amber-700"}`}>{tokenStatus.text}</p>
-              )}
-            </details>
-            <div className="mb-3 flex items-center justify-between">
+            <div className="sidebar-head">
               <h2 className="section-title">Courses</h2>
-              <div className="flex items-center gap-2">
-                <button type="button" onClick={startNewCourse} className="small-button"><Plus size={15} /> New course</button>
-              </div>
+              <button type="button" onClick={startNewCourse} className="small-button"><Plus size={14} /> New</button>
             </div>
-            <div className="space-y-2">
+            <div className="course-list">
               {courses.map((item) => (
                 <button
                   key={item.courseId}
+                  type="button"
                   draggable={!busy}
                   onDragStart={(event) => setDragData(event, "course", item.courseId)}
                   onDragEnd={clearDragStyle}
@@ -1166,320 +1560,398 @@ function CoursesAdmin() {
                     const dragged = readDragData(event);
                     if (dragged?.kind === "course") void reorderCourses(dragged.id, item.courseId);
                   }}
-                  onClick={() => run("Loading course", () => loadCourse(item.courseId))}
-                  className={`list-row text-left ${selectedCourseId === item.courseId ? "list-row-active" : ""}`}
+                  onClick={() => void openCourse(item.courseId)}
+                  className={`list-row ${selectedCourseId === item.courseId ? "list-row-active" : ""}`}
                 >
-                  <span className="flex items-center justify-between gap-2">
-                    <span className="flex min-w-0 items-center gap-1.5"><GripVertical size={14} className="shrink-0 text-[#9aa1ad]" /><span className="font-medium">{item.name}</span></span>
-                    <span className={`status-pill ${item.disabled ? "status-pill-disabled" : "status-pill-enabled"}`}>
-                      {item.disabled ? "Disabled" : "Enabled"}
-                    </span>
+                  <span className="list-row-top">
+                    <GripVertical size={14} className="list-row-grip" />
+                    <span className="list-row-name">{item.name}</span>
+                    {loadingCourseId === item.courseId && <Loader2 size={14} className="animate-spin text-[#df5c79]" />}
                   </span>
-                  <span className="text-xs text-[#6b7280]">{item.dayCount} days</span>
+                  <span className="list-row-meta">
+                    {item.dayCount} {item.dayCount === 1 ? "day" : "days"} · {item.isPaid ? "Paid" : "Free"}
+                    {item.disabled && <span className="status-pill status-pill-disabled">Disabled</span>}
+                  </span>
                 </button>
               ))}
             </div>
           </aside>
 
           <section className="course-content">
-            <div className="course-heading mb-4 flex items-center justify-between">
-              <div>
-                <h2 className="text-2xl font-semibold">{course?.name || "New course"}</h2>
-                <p className="text-sm text-[#6b7280]">{message}{busy ? "..." : ""}</p>
-              </div>
-              {(busy || initialLoading) && <Loader2 className="animate-spin text-[#e94b76]" />}
+            <div className="course-picker">
+              <select className="field" value={selectedCourseId} onChange={(e) => e.target.value && void openCourse(e.target.value)} aria-label="Course">
+                {!selectedCourseId && <option value="">{isCreatingCourse ? "New course" : "Choose a course"}</option>}
+                {courses.map((item) => <option key={item.courseId} value={item.courseId}>{item.name}</option>)}
+              </select>
+              <button type="button" onClick={startNewCourse} className="secondary-button"><Plus size={15} /> New</button>
             </div>
 
-            {course && <div className="course-metadata-bar">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <button className="inline-flex items-center gap-2 text-left" onClick={editCourse}>
-                  <BookOpen size={18} className="text-[#e94b76]" />
-                  <span>
-                    <span className="block text-sm font-semibold">Course metadata</span>
-                  </span>
-                </button>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button className="secondary-button" onClick={addIntroVideo}><Video size={15} /> Intro video</button>
-                  <button className="secondary-button" onClick={editCourse}><Pencil size={15} /> Edit</button>
-                  <button className="secondary-button" onClick={promoteCourse} disabled={busy || !PROD_API_BASE} title={!PROD_API_BASE ? "Configure NEXT_PUBLIC_COURSES_PROD_API_BASE_URL" : "Copy this course and its assets to production"}>
-                    <Upload size={15} /> Promote
-                  </button>
-                  <button className={course.disabled ? "primary-button" : "secondary-button"} onClick={toggleCourseDisabled} disabled={busy}>
-                    <Power size={15} /> {course.disabled ? "Enable" : "Disable"}
-                  </button>
-                </div>
-              </div>
-            </div>}
-
             {initialLoading && !course && (
-              <div className="panel grid min-h-40 place-items-center text-sm font-semibold text-[#6b7280]">
-                Loading course data...
-              </div>
+              <div className="empty-card"><Loader2 className="animate-spin text-[#df5c79]" size={20} /> Loading courses…</div>
             )}
 
             {!initialLoading && !course && !isCreatingCourse && (
-              <div className="panel grid min-h-40 place-items-center text-center">
-                <div>
-                  <p className="text-sm font-semibold">No course selected</p>
-                  <p className="mt-1 text-xs text-[#6b7280]">Refresh courses or choose one from the list.</p>
-                </div>
-              </div>
+              <div className="empty-card">Choose a course to edit it.</div>
             )}
 
             {isCreatingCourse && (
-              <div className="panel grid min-h-40 place-items-center text-center">
-                <div>
-                  <BookOpen className="mx-auto mb-3 text-[#e94b76]" size={24} />
-                  <p className="text-sm font-semibold">Create a new course</p>
-                  <p className="mt-1 max-w-sm text-xs text-[#6b7280]">Complete the course metadata in the editor. Saving creates its Bunny collection and DynamoDB record.</p>
-                </div>
+              <div className="empty-card">
+                <BookOpen className="text-[#df5c79]" size={22} />
+                <p className="font-semibold text-[#27312d]">New course</p>
+                <p>Fill in the details, then create it. Days and lessons come next.</p>
               </div>
             )}
 
             {course && (
-              <div className="course-sections">
-                <CourseSection
-                  days={introVideoDays(course)}
-                  downloadables={course.downloadables || []}
-                  onEditDay={editDay}
-                  onAddVideo={addVideoToDay}
-                  onAddText={addTextToDay}
-                  onAddDownloadable={addDownloadableToDay}
-                  onEditItem={editItem}
-                  onEditDownloadable={editDownloadable}
-                  onDeleteItem={deleteItem}
-                  onDeleteDownloadable={deleteDownloadable}
-                  onDeleteDay={deleteDay}
-                  onReorderItem={reorderItems}
-                  introOnly
-                />
-                <CourseSection
-                  days={course.days}
-                  downloadables={course.downloadables || []}
-                  onEditDay={editDay}
-                  onAddVideo={addVideoToDay}
-                  onAddText={addTextToDay}
-                  onAddDownloadable={addDownloadableToDay}
-                  onEditItem={editItem}
-                  onEditDownloadable={editDownloadable}
-                  onDeleteItem={deleteItem}
-                  onDeleteDownloadable={deleteDownloadable}
-                  onDeleteDay={deleteDay}
-                  onAddDay={addDay}
-                  onReorderDay={reorderDays}
-                  onReorderItem={reorderItems}
-                  onReorderDownloadable={reorderDownloadables}
-                />
-                <DownloadablesSection
-                  downloadables={course.downloadables || []}
-                  days={courseDays(course)}
-                  onEdit={editDownloadable}
-                  onDelete={deleteDownloadable}
-                />
-              </div>
-            )}
-          </section>
+              <>
+                <div className="course-hero">
+                  <div className="course-hero-main">
+                    <div className="course-thumb" style={course.thumbnailUrl ? { backgroundImage: `url("${course.thumbnailUrl}")` } : undefined}>
+                      {!course.thumbnailUrl && <BookOpen size={22} />}
+                    </div>
+                    <div className="min-w-0">
+                      <h2>{course.name}</h2>
+                      <p className="course-hero-meta">
+                        {course.days.length} {course.days.length === 1 ? "day" : "days"} · {course.isPaid ? "Paid" : "Free"} · By {course.authorName || course.authorId}
+                      </p>
+                      <p className="course-hero-status">
+                        <span className={`status-pill ${course.disabled ? "status-pill-off" : "status-pill-enabled"}`} title="The debug app uses the development backend this builder edits.">
+                          Debug app: {course.disabled ? "Disabled" : "Enabled"}
+                        </span>
+                        {PROD_API_BASE && (
+                          <span className={`status-pill ${publishedPillClass}`} title={publishedError || "The published app uses the production backend. Promote copies this course there."}>
+                            Published app: {publishedLabel}
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="course-hero-actions">
+                    <button type="button" className="secondary-button" onClick={editCourse}><Pencil size={15} /> Edit details</button>
+                    <button type="button" className="secondary-button" onClick={promoteCourse} disabled={busy || !PROD_API_BASE} title={!PROD_API_BASE ? "Configure NEXT_PUBLIC_COURSES_PROD_API_BASE_URL" : "Copy this course and its files to production"}>
+                      <Rocket size={15} /> <span>Promote<span className="hide-sm"> to production</span></span>
+                    </button>
+                    <Menu id="course" label="Course options" iconOnly icon={<Ellipsis size={16} />} openMenu={openMenu} setOpenMenu={setOpenMenu}>
+                      <button type="button" role="menuitem" className="menu-item" onClick={toggleCourseDisabled} disabled={busy}><Power size={15} /> {course.disabled ? "Enable in debug app" : "Disable in debug app"}</button>
+                      {PROD_API_BASE && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="menu-item"
+                          onClick={togglePublishedDisabled}
+                          disabled={busy || publishedState === "unknown" || publishedState === "missing"}
+                          title={publishedState === "missing" ? "Promote the course first" : publishedState === "unknown" ? "Add a sign-in token to check the published app" : undefined}
+                        >
+                          <Power size={15} /> {publishedState === "disabled" ? "Enable in published app" : "Disable in published app"}
+                        </button>
+                      )}
+                      <button type="button" role="menuitem" className="menu-item menu-item-danger" onClick={deleteCourse}><Trash2 size={15} /> Delete course</button>
+                    </Menu>
+                  </div>
+                </div>
 
-          <aside className="course-editor" aria-label="Course editor">
-            <div className="editor-heading">
-              <h3 className="text-base font-semibold">Editor</h3>
-              <span className="editor-context">{isCreatingCourse ? "New course" : course?.name || "No course selected"}</span>
-            </div>
+                <div className="intro-gap" />
+                {introVideoDays(course).map((day) => (
+                  <DayCard
+                    key={day.dayId}
+                    day={day}
+                    rewards={[]}
+                    intro
+                    defaultOpen
+                    openMenu={openMenu}
+                    setOpenMenu={setOpenMenu}
+                    activeKey={activeKey}
+                    onEditDay={editDay}
+                    onDeleteDay={deleteDay}
+                    onAddVideo={addVideoToDay}
+                    onAddPrompt={addTextToDay}
+                    onAddInstruction={addInstructionToDay}
+                    onAddReward={addDownloadableToDay}
+                    onEditItem={editItem}
+                    onDeleteItem={deleteItem}
+                    onEditReward={editDownloadable}
+                    onDeleteReward={deleteDownloadable}
+                    onReorderItem={reorderItems}
+                  />
+                ))}
 
-            <label className="label mb-4">
-              Operation
-              <select className="field" value={editorMode} disabled={!course} onChange={(e) => setEditorMode(e.target.value as EditorMode)}>
-                <option value="course">Course metadata</option>
-                <option value="day">Day metadata</option>
-                <option value="video">Video item</option>
-                <option value="text">Text / prompt</option>
-                <option value="downloadable">Downloadable</option>
-              </select>
-            </label>
-
-            {editorMode === "course" && (
-              <form onSubmit={course ? saveCourse : createCourse} className="panel">
-                <div className="panel-heading"><BookOpen size={18} /> Course metadata</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="label col-span-2">Name<input className="field" value={courseForm.name} onChange={(e) => setCourseForm({ ...courseForm, name: e.target.value })} /></label>
-                  <label className="label col-span-2">Description<textarea className="field min-h-24" value={courseForm.description} onChange={(e) => setCourseForm({ ...courseForm, description: e.target.value })} /></label>
-                  <label className="label">Author name<input className="field" value={courseForm.authorName} onChange={(e) => setCourseForm({ ...courseForm, authorName: e.target.value })} /></label>
-                  <label className="label">Course order<input type="number" step="1" className="field" value={courseForm.order} onChange={(e) => setCourseForm({ ...courseForm, order: Number(e.target.value) })} /></label>
-                  <label className="label">Thumbnail URL<input className="field" value={courseForm.thumbnailUrl} onChange={(e) => setCourseForm({ ...courseForm, thumbnailUrl: e.target.value })} /></label>
-                  <label className="label col-span-2">
-                    Upload thumbnail
-                    <input
-                      type="file"
-                      accept="image/*"
-                      className="file-field"
-                      onChange={(event) => setThumbnailFile(event.target.files?.[0] || null)}
+                <div className="section-head">
+                  <h3>Days <span className="count">{course.days.length}</span></h3>
+                  <button type="button" className="secondary-button" onClick={addDay}><Plus size={15} /> New day</button>
+                </div>
+                {course.days.length === 0 && <div className="empty-card">No days yet. Add the first day.</div>}
+                <div className="day-list">
+                  {course.days.map((day) => (
+                    <DayCard
+                      key={day.dayId}
+                      day={day}
+                      rewards={downloadablesForDay(course.downloadables, day.dayId)}
+                      defaultOpen={day.dayNumber <= 2}
+                      onReorderDay={reorderDays}
+                      onReorderReward={reorderDownloadables}
+                      openMenu={openMenu}
+                      setOpenMenu={setOpenMenu}
+                      activeKey={activeKey}
+                      onEditDay={editDay}
+                      onDeleteDay={deleteDay}
+                      onAddVideo={addVideoToDay}
+                      onAddPrompt={addTextToDay}
+                      onAddInstruction={addInstructionToDay}
+                      onAddReward={addDownloadableToDay}
+                      onEditItem={editItem}
+                      onDeleteItem={deleteItem}
+                      onEditReward={editDownloadable}
+                      onDeleteReward={deleteDownloadable}
+                      onReorderItem={reorderItems}
                     />
-                    {thumbnailFile && <span className="mt-1 text-xs text-slate-500">Will upload compressed WebP: {thumbnailFile.name}</span>}
-                  </label>
-                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={courseForm.isPaid} onChange={(e) => setCourseForm({ ...courseForm, isPaid: e.target.checked })} /> Paid course</label>
+                  ))}
                 </div>
-                <div className="mt-4 flex gap-2">
-                  <button className="primary-button" disabled={busy || !courseForm.name.trim()}><Save size={16} /> {course ? "Save course" : "Create course"}</button>
-                  {course && <button type="button" onClick={deleteCourse} className="danger-button"><Trash2 size={16} /> Delete</button>}
-                </div>
-              </form>
-            )}
 
-            {editorMode === "day" && (
-              <form onSubmit={saveDay} className="panel">
-                <div className="panel-heading"><Plus size={18} /> Day metadata</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="label">Day ID<input className="field" value={dayForm.dayId} onChange={(e) => setDayForm({ ...dayForm, dayId: e.target.value })} /></label>
-                  <label className="label">Day number<input type="number" className="field" value={dayForm.dayNumber} onChange={(e) => setDayForm({ ...dayForm, dayNumber: Number(e.target.value) })} /></label>
-                  <label className="label col-span-2">Title<input className="field" value={dayForm.title} onChange={(e) => setDayForm({ ...dayForm, title: e.target.value })} /></label>
-                  <label className="label col-span-2">Text content<textarea className="field min-h-32" value={dayForm.textContent} onChange={(e) => setDayForm({ ...dayForm, textContent: e.target.value })} /></label>
-                </div>
-                <button className="primary-button mt-4" disabled={!course || busy}><Save size={16} /> Save day</button>
-              </form>
-            )}
-
-            {editorMode === "video" && (
-              <form onSubmit={saveItem} className="panel">
-                <div className="panel-heading"><Video size={18} /> Video item</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="label">Day ID<input className="field" value={itemForm.dayId} onChange={(e) => setItemForm({ ...itemForm, dayId: e.target.value })} /></label>
-                  <label className="label">Order<input type="number" className="field" value={itemForm.order} onChange={(e) => setItemForm({ ...itemForm, order: Number(e.target.value) })} /></label>
-                  <label className="label col-span-2">Title<input className="field" value={itemForm.title} onChange={(e) => setItemForm({ ...itemForm, title: e.target.value })} /></label>
-                  <label className="label col-span-2">Item ID<input className="field" value={itemForm.itemId} onChange={(e) => setItemForm({ ...itemForm, itemId: e.target.value })} placeholder="Leave empty for auto item id" /></label>
-                  <label className="label col-span-2">Video ID<input className="field" value={itemForm.videoId} onChange={(e) => setItemForm({ ...itemForm, videoId: e.target.value })} /></label>
-                  <label className="label col-span-2">Upload video to Bunny<input type="file" accept="video/*" className="file-field" onChange={(e) => setVideoFile(e.target.files?.[0] || null)} /></label>
-                  <label className="label">Duration seconds <span className="text-xs font-medium text-[#6b7280]">(auto from Bunny)</span><input type="number" className="field bg-[#f6f7f9] text-[#6b7280]" value={itemForm.durationSeconds} disabled readOnly /></label>
-                  <label className="flex items-end gap-2 pb-2 text-sm"><input type="checkbox" checked={itemForm.requiredForCompletion} onChange={(e) => setItemForm({ ...itemForm, requiredForCompletion: e.target.checked })} /> Required</label>
-                  <label className="label col-span-2">Description<textarea className="field min-h-24" value={itemForm.description} onChange={(e) => setItemForm({ ...itemForm, description: e.target.value })} /></label>
-                </div>
-                <button className="primary-button mt-4" disabled={!course || busy}><Upload size={16} /> Save video item</button>
-              </form>
-            )}
-
-            {editorMode === "text" && (
-              <form onSubmit={savePrompt} className="panel">
-                <div className="panel-heading"><FileText size={18} /> Text / prompt</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="label">Day ID<input className="field" value={promptForm.dayId} onChange={(e) => setPromptForm({ ...promptForm, dayId: e.target.value })} /></label>
-                  <label className="label">Order<input type="number" className="field" value={promptForm.order} onChange={(e) => setPromptForm({ ...promptForm, order: Number(e.target.value) })} /></label>
-                  <label className="label col-span-2">Title<input className="field" value={promptForm.title} onChange={(e) => setPromptForm({ ...promptForm, title: e.target.value })} /></label>
-                  <label className="label col-span-2">Markdown text<textarea className="field min-h-40" value={promptForm.textContent} onChange={(e) => setPromptForm({ ...promptForm, textContent: e.target.value })} /></label>
-                </div>
-                <button className="primary-button mt-4" disabled={!course || busy}><Save size={16} /> Save text</button>
-              </form>
-            )}
-
-            {editorMode === "downloadable" && (
-              <form onSubmit={saveDownloadable} className="panel">
-                <div className="panel-heading"><Download size={18} /> Reward</div>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="label col-span-2">
-                    Unlock after
-                    <select
-                      className="field"
-                      value={downloadableForm.unlockAfter}
-                      onChange={(event) => {
-                        const unlockAfter = event.target.value;
-                        setDownloadableForm({
-                          ...downloadableForm,
-                          unlockAfter,
-                          order: downloadableForm.assetId
-                            ? downloadableForm.order
-                            : nextDownloadableOrder(course?.downloadables, unlockAfter),
-                        });
-                      }}
-                    >
-                      {downloadableDayOptions(course, downloadableForm.unlockAfter).map((option) => (
-                        <option key={option.value} value={option.value}>{option.label}</option>
-                      ))}
-                    </select>
-                  </label>
-                  <label className="label col-span-2">Title<input className="field" value={downloadableForm.title} onChange={(e) => setDownloadableForm({ ...downloadableForm, title: e.target.value })} /></label>
-                  <label className="label">Type
-                    <select className="field" value={downloadableForm.type} onChange={(e) => setDownloadableForm({ ...downloadableForm, type: e.target.value })}>
-                      <option value="file">File</option>
-                      <option value="image">Image</option>
-                      <option value="pdf">PDF</option>
-                      <option value="zip">ZIP</option>
-                      <option value="spotify">Spotify Playlist</option>
-                      <option value="external_link">External Link</option>
-                      <option value="playlist">Playlist</option>
-                    </select>
-                  </label>
-                  <label className="label">Order<input type="number" min="1" className="field" value={downloadableForm.order} onChange={(e) => setDownloadableForm({ ...downloadableForm, order: Number(e.target.value) })} /></label>
-                  <label className="label col-span-2">
-                    Upload file(s)
-                    <input
-                      type="file"
-                      multiple
-                      accept="image/*,application/pdf,.zip"
-                      className="file-field"
-                      onChange={(event) => {
-                        const files = Array.from(event.target.files || []);
-                        setDownloadableFiles(files);
-                        if (files.length > 1) {
-                          setDownloadableForm((current) => ({
-                            ...current,
-                            type: "playlist",
-                            title: current.title || "Reward playlist",
-                          }));
-                        } else if (files.length === 1 && downloadableForm.type === "playlist") {
-                          setDownloadableForm((current) => ({
-                            ...current,
-                            title: current.title || files[0].name,
-                          }));
-                        }
-                      }}
-                    />
-                  </label>
-                  {downloadableFiles.length > 0 && (
-                    <div className="col-span-2 rounded border border-[#e1e5ee] bg-[#f8fafc] p-3">
-                      <div className="mb-2 text-xs font-semibold text-[#4b5563]">
-                        {downloadableFiles.length > 1 ? `Playlist files (${downloadableFiles.length})` : "Selected file"}
-                      </div>
-                      <div className="space-y-1">
-                        {downloadableFiles.map((file, index) => (
-                          <div key={`${file.name}-${file.lastModified}`} className="flex items-center justify-between gap-3 text-xs text-[#6b7280]">
-                            <span className="truncate">{index + 1}. {file.name}</span>
-                            <span className="shrink-0 uppercase">{downloadableTypeForFile(file)}</span>
-                          </div>
+                {courseRewards.length > 0 && (
+                  <>
+                    <div className="section-head">
+                      <h3>Course rewards</h3>
+                    </div>
+                    <div className="tree-node day-card">
+                      <div className="tree-items">
+                        {courseRewards.map((downloadable) => (
+                          <RewardRow
+                            key={downloadable.assetId}
+                            downloadable={downloadable}
+                            active={activeKey === `reward:${downloadable.assetId}`}
+                            onEdit={editDownloadable}
+                            onDelete={deleteDownloadable}
+                          />
                         ))}
                       </div>
                     </div>
+                  </>
+                )}
+              </>
+            )}
+          </section>
+
+          {editorMode && <div className="editor-backdrop" onClick={closeEditor} aria-hidden />}
+          <aside className={`course-editor ${editorMode ? "is-open" : ""}`} aria-label="Editor">
+            {!editor ? (
+              <div className="editor-empty">
+                <PenLine size={22} />
+                <p className="font-semibold text-[#27312d]">Nothing selected</p>
+                <p>Click a lesson to edit it, or use Add on a day.</p>
+              </div>
+            ) : (
+              <form onSubmit={submitEditor} className="editor-form">
+                <div className="editor-head">
+                  <span className={`kind-icon kind-${editor.kind}`}>{editor.icon}</span>
+                  <div className="min-w-0">
+                    <h3>{editor.title}</h3>
+                    <p>{editor.context}</p>
+                  </div>
+                  <button type="button" className="icon-button compact ghost" onClick={closeEditor} aria-label="Close editor"><X size={16} /></button>
+                </div>
+
+                <div className="editor-body">
+                  {editorMode === "course" && (
+                    <>
+                      <Field label="Name"><input className="field" value={courseForm.name} onChange={(e) => setCourseForm({ ...courseForm, name: e.target.value })} /></Field>
+                      <Field label="Description"><textarea className="field min-h-24" value={courseForm.description} onChange={(e) => setCourseForm({ ...courseForm, description: e.target.value })} /></Field>
+                      <div className="field-row">
+                        <Field label="Author"><input className="field" value={courseForm.authorName} onChange={(e) => setCourseForm({ ...courseForm, authorName: e.target.value })} /></Field>
+                        <Field label="Access">
+                          <select className="field" value={courseForm.isPaid ? "paid" : "free"} onChange={(e) => setCourseForm({ ...courseForm, isPaid: e.target.value === "paid" })}>
+                            <option value="free">Free</option>
+                            <option value="paid">Paid</option>
+                          </select>
+                        </Field>
+                      </div>
+                      <Field label="Thumbnail" hint={thumbnailFile ? `Will upload as WebP: ${thumbnailFile.name}` : "Images are compressed before upload."}>
+                        <input type="file" accept="image/*" className="file-field" onChange={(event) => setThumbnailFile(event.target.files?.[0] || null)} />
+                      </Field>
+                      <Advanced>
+                        <Field label="Course order"><input type="number" step="1" className="field" value={courseForm.order} onChange={(e) => setCourseForm({ ...courseForm, order: Number(e.target.value) })} /></Field>
+                        <Field label="Thumbnail URL"><input className="field" value={courseForm.thumbnailUrl} onChange={(e) => setCourseForm({ ...courseForm, thumbnailUrl: e.target.value })} /></Field>
+                      </Advanced>
+                    </>
                   )}
-                  {downloadableForm.assetId && (findCourseDownloadable(course, downloadableForm.assetId)?.items?.length || 0) > 0 && (
-                    <div className="col-span-2 rounded border border-[#e1e5ee] bg-[#f8fafc] p-3">
-                      <div className="mb-2 text-xs font-semibold text-[#4b5563]">Playlist order</div>
-                      <div className="space-y-1">
-                        {[...(findCourseDownloadable(course, downloadableForm.assetId)?.items || [])]
-                          .sort((a, b) => a.order - b.order)
-                          .map((item) => (
-                            <div
-                              key={item.assetId}
-                              className="playlist-order-row"
-                              onDragOver={(event) => event.preventDefault()}
-                              onDrop={(event) => {
-                                const dragged = readDragData(event);
-                                if (dragged?.kind === "playlist-item" && dragged.parentId === downloadableForm.assetId) {
-                                  event.preventDefault();
-                                  void reorderDownloadableItems(downloadableForm.assetId, dragged.id, item.assetId);
-                                }
-                              }}
-                            >
-                              <span draggable onDragStart={(event) => setDragData(event, "playlist-item", item.assetId, downloadableForm.assetId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag playlist file"><GripVertical size={14} /></span>
-                              <span className="truncate text-xs text-[#4b5563]">{item.order}. {item.title}</span>
+
+                  {editorMode === "day" && (
+                    <>
+                      <Field label="Title"><input className="field" value={dayForm.title} onChange={(e) => setDayForm({ ...dayForm, title: e.target.value })} /></Field>
+                      <Advanced>
+                        <Field label="Day number"><input type="number" className="field" value={dayForm.dayNumber} onChange={(e) => setDayForm({ ...dayForm, dayNumber: Number(e.target.value) })} /></Field>
+                        <Field label="Day ID" hint={dayIsNew ? undefined : "A day's ID can't be changed."}>
+                          <input className="field" value={dayForm.dayId} disabled={!dayIsNew} onChange={(e) => setDayForm({ ...dayForm, dayId: e.target.value })} />
+                        </Field>
+                      </Advanced>
+                    </>
+                  )}
+
+                  {editorMode === "video" && (
+                    <>
+                      <DayField days={allDays} value={itemForm.dayId} onChange={(dayId) => setItemForm({ ...itemForm, dayId })} />
+                      <Field label="Title"><input className="field" value={itemForm.title} onChange={(e) => setItemForm({ ...itemForm, title: e.target.value })} /></Field>
+                      {itemForm.videoId ? (
+                        <p className="note">This lesson has a video. To replace it, clear the Video ID under Advanced and choose a new file.</p>
+                      ) : (
+                        <Field label="Video file" hint={videoFile ? `Uploads when you save: ${videoFile.name}` : "Uploads to Bunny when you save."}>
+                          <input type="file" accept="video/*" className="file-field" onChange={(e) => setVideoFile(e.target.files?.[0] || null)} />
+                        </Field>
+                      )}
+                      <Field label="Lesson notes" hint="Shown under the video in the app."><textarea className="field min-h-24" value={itemForm.description} onChange={(e) => setItemForm({ ...itemForm, description: e.target.value })} /></Field>
+                      <Toggle checked={itemForm.requiredForCompletion} onChange={(checked) => setItemForm({ ...itemForm, requiredForCompletion: checked })} />
+                      <Advanced>
+                        <Field label="Order"><input type="number" className="field" value={itemForm.order} onChange={(e) => setItemForm({ ...itemForm, order: Number(e.target.value) })} /></Field>
+                        <Field label="Item ID"><input className="field" value={itemForm.itemId} onChange={(e) => setItemForm({ ...itemForm, itemId: e.target.value })} placeholder="Made for you if empty" /></Field>
+                        <Field label="Video ID"><input className="field" value={itemForm.videoId} onChange={(e) => setItemForm({ ...itemForm, videoId: e.target.value })} placeholder="Filled after upload" /></Field>
+                        <Field label="Duration" hint="Read from Bunny."><input className="field" value={secondsToLabel(itemForm.durationSeconds)} disabled readOnly /></Field>
+                      </Advanced>
+                    </>
+                  )}
+
+                  {editorMode === "text" && (
+                    <>
+                      <DayField days={course?.days || []} value={promptForm.dayId} onChange={(dayId) => setPromptForm({ ...promptForm, dayId })} />
+                      <Field label="Title"><input className="field" value={promptForm.title} onChange={(e) => setPromptForm({ ...promptForm, title: e.target.value })} /></Field>
+                      <MarkdownField label="Prompt text" value={promptForm.textContent} onChange={(textContent) => setPromptForm({ ...promptForm, textContent })} placeholder={"Prompt: What made you smile today?"} />
+                      <Advanced>
+                        <Field label="Order"><input type="number" className="field" value={promptForm.order} onChange={(e) => setPromptForm({ ...promptForm, order: Number(e.target.value) })} /></Field>
+                      </Advanced>
+                    </>
+                  )}
+
+                  {editorMode === "instruction" && (
+                    <>
+                      <DayField days={course?.days || []} value={instructionForm.dayId} onChange={(dayId) => setInstructionForm({ ...instructionForm, dayId })} />
+                      <Field label="Title"><input className="field" value={instructionForm.title} onChange={(e) => setInstructionForm({ ...instructionForm, title: e.target.value })} placeholder="Print your kit" /></Field>
+                      <MarkdownField label="Text" value={instructionForm.description} onChange={(description) => setInstructionForm({ ...instructionForm, description })} placeholder={"Download the kit below, print it and cut out the pieces you love."} />
+                      <Toggle checked={instructionForm.requiredForCompletion} onChange={(checked) => setInstructionForm({ ...instructionForm, requiredForCompletion: checked })} />
+                      <Advanced>
+                        <Field label="Order"><input type="number" className="field" value={instructionForm.order} onChange={(e) => setInstructionForm({ ...instructionForm, order: Number(e.target.value) })} /></Field>
+                        <Field label="Item ID"><input className="field" value={instructionForm.itemId} onChange={(e) => setInstructionForm({ ...instructionForm, itemId: e.target.value })} placeholder="Made for you if empty" /></Field>
+                      </Advanced>
+                    </>
+                  )}
+
+                  {editorMode === "downloadable" && (
+                    <>
+                      <Field label="Unlocks after">
+                        <select
+                          className="field"
+                          value={downloadableForm.unlockAfter}
+                          onChange={(event) => {
+                            const unlockAfter = event.target.value;
+                            setDownloadableForm({
+                              ...downloadableForm,
+                              unlockAfter,
+                              order: downloadableForm.assetId
+                                ? downloadableForm.order
+                                : nextDownloadableOrder(course?.downloadables, unlockAfter),
+                            });
+                          }}
+                        >
+                          {downloadableDayOptions(course, downloadableForm.unlockAfter).map((option) => (
+                            <option key={option.value} value={option.value}>{option.label}</option>
+                          ))}
+                        </select>
+                      </Field>
+                      <Field label="Title"><input className="field" value={downloadableForm.title} onChange={(e) => setDownloadableForm({ ...downloadableForm, title: e.target.value })} /></Field>
+                      <Field label="Type">
+                        <select className="field" value={downloadableForm.type} onChange={(e) => setDownloadableForm({ ...downloadableForm, type: e.target.value })}>
+                          <option value="file">File</option>
+                          <option value="image">Image</option>
+                          <option value="pdf">PDF</option>
+                          <option value="zip">ZIP</option>
+                          <option value="spotify">Spotify playlist</option>
+                          <option value="external_link">Link</option>
+                          <option value="playlist">Gallery (several files)</option>
+                        </select>
+                      </Field>
+                      {isLinkReward ? (
+                        <Field label={downloadableForm.type === "spotify" ? "Spotify link" : "Link"}>
+                          <input className="field" value={downloadableForm.url} onChange={(e) => setDownloadableForm({ ...downloadableForm, url: e.target.value })} placeholder="https://" />
+                        </Field>
+                      ) : (
+                        <Field label="Files" hint="Choose several images to make a gallery.">
+                          <input
+                            type="file"
+                            multiple
+                            accept="image/*,application/pdf,.zip"
+                            className="file-field"
+                            onChange={(event) => {
+                              const files = Array.from(event.target.files || []);
+                              setDownloadableFiles(files);
+                              if (files.length > 1) {
+                                setDownloadableForm((current) => ({
+                                  ...current,
+                                  type: "playlist",
+                                  title: current.title || "Reward playlist",
+                                }));
+                              } else if (files.length === 1 && downloadableForm.type === "playlist") {
+                                setDownloadableForm((current) => ({
+                                  ...current,
+                                  title: current.title || files[0].name,
+                                }));
+                              }
+                            }}
+                          />
+                        </Field>
+                      )}
+                      {downloadableFiles.length > 0 && (
+                        <div className="sub-list">
+                          <div className="sub-list-title">{downloadableFiles.length > 1 ? `${downloadableFiles.length} files to upload` : "File to upload"}</div>
+                          {downloadableFiles.map((file, index) => (
+                            <div key={`${file.name}-${file.lastModified}`} className="sub-list-row">
+                              <span className="truncate">{index + 1}. {file.name}</span>
+                              <span className="shrink-0 uppercase">{downloadableTypeForFile(file)}</span>
                             </div>
                           ))}
-                      </div>
-                    </div>
+                        </div>
+                      )}
+                      {downloadableForm.assetId && (findCourseDownloadable(course, downloadableForm.assetId)?.items?.length || 0) > 0 && (
+                        <div className="sub-list">
+                          <div className="sub-list-title">Order in the gallery (drag to change)</div>
+                          {[...(findCourseDownloadable(course, downloadableForm.assetId)?.items || [])]
+                            .sort((a, b) => a.order - b.order)
+                            .map((item) => (
+                              <div
+                                key={item.assetId}
+                                className="playlist-order-row"
+                                onDragOver={(event) => event.preventDefault()}
+                                onDrop={(event) => {
+                                  const dragged = readDragData(event);
+                                  if (dragged?.kind === "playlist-item" && dragged.parentId === downloadableForm.assetId) {
+                                    event.preventDefault();
+                                    void reorderDownloadableItems(downloadableForm.assetId, dragged.id, item.assetId);
+                                  }
+                                }}
+                              >
+                                <span draggable onDragStart={(event) => setDragData(event, "playlist-item", item.assetId, downloadableForm.assetId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag to reorder"><GripVertical size={14} /></span>
+                                <span className="truncate">{item.order}. {item.title}</span>
+                              </div>
+                            ))}
+                        </div>
+                      )}
+                      <Advanced>
+                        <Field label="Order"><input type="number" min="1" className="field" value={downloadableForm.order} onChange={(e) => setDownloadableForm({ ...downloadableForm, order: Number(e.target.value) })} /></Field>
+                        {!isLinkReward && (
+                          <Field label="File URL"><input className="field" value={downloadableForm.url} onChange={(e) => setDownloadableForm({ ...downloadableForm, url: e.target.value })} placeholder="Filled after upload" /></Field>
+                        )}
+                      </Advanced>
+                    </>
                   )}
-                  <label className="label col-span-2">Existing URL<input className="field" value={downloadableForm.url} onChange={(e) => setDownloadableForm({ ...downloadableForm, url: e.target.value })} placeholder="Filled automatically after upload" /></label>
                 </div>
-                <button className="primary-button mt-4" disabled={!course || busy}><Upload size={16} /> Save reward</button>
+
+                <div className="editor-footer">
+                  <button className="primary-button" disabled={editor.disabled}>
+                    {busy ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} {editor.save}
+                  </button>
+                  <button type="button" className="secondary-button" onClick={closeEditor}>Cancel</button>
+                  {editorMode === "text" && promptDayHasPrompt && (
+                    <button type="button" className="link-button" disabled={busy} onClick={promptToInstruction}>Make it an instruction</button>
+                  )}
+                </div>
               </form>
             )}
-
-            {selectedDay && <p className="mt-4 text-xs text-[#6b7280]">Selected day: {selectedDay.title}</p>}
           </aside>
         </div>
       )}
@@ -1487,165 +1959,338 @@ function CoursesAdmin() {
   );
 }
 
-function CourseSection({ days, downloadables, onEditDay, onAddVideo, onAddText, onAddDownloadable, onEditItem, onEditDownloadable, onDeleteItem, onDeleteDownloadable, onDeleteDay, onAddDay, onReorderDay, onReorderItem, onReorderDownloadable, introOnly = false }: {
-  days: CourseDay[];
-  downloadables: CourseDownloadable[];
-  onEditDay: (day: CourseDay) => void;
-  onAddVideo: (day: CourseDay) => void;
-  onAddText: (day: CourseDay) => void;
-  onAddDownloadable: (day: CourseDay) => void;
-  onEditItem: (day: CourseDay, item: CourseDayItem) => void;
-  onEditDownloadable: (downloadable: CourseDownloadable) => void;
-  onDeleteItem: (dayId: string, itemId: string) => void;
-  onDeleteDownloadable: (assetId: string) => void;
-  onDeleteDay: (dayId: string) => void;
-  onAddDay?: () => void;
-  onReorderDay?: (sourceId: string, targetId: string) => Promise<void>;
-  onReorderItem: (dayId: string, sourceId: string, targetId: string) => Promise<void>;
-  onReorderDownloadable?: (dayId: string, sourceId: string, targetId: string) => Promise<void>;
-  introOnly?: boolean;
+/** "Day 3 · Purposeful Visualization", or just "Day 3" when the day has no title of its own. */
+function dayLabel(day: CourseDay) {
+  if (day.dayNumber <= 0) return day.title || "Introduction";
+  const plain = `Day ${day.dayNumber}`;
+  const title = day.title?.trim() || "";
+  return title && title.toLowerCase() !== plain.toLowerCase() ? `${plain} · ${title}` : plain;
+}
+
+const ITEM_KINDS: Record<string, { label: string; kind: string; icon: (size: number) => ReactNode }> = {
+  video: { label: "Video", kind: "video", icon: (size) => <Video size={size} /> },
+  prompt: { label: "Prompt", kind: "prompt", icon: (size) => <PenLine size={size} /> },
+  instruction: { label: "Instruction", kind: "instruction", icon: (size) => <BookOpen size={size} /> },
+};
+
+function itemKind(item: CourseDayItem) {
+  return ITEM_KINDS[item.type] || { label: item.type || "Lesson", kind: "other", icon: (size: number) => <BookOpen size={size} /> };
+}
+
+function rewardTypeLabel(downloadable: CourseDownloadable) {
+  if (downloadable.type === "playlist" || downloadable.items?.length) {
+    const count = downloadable.items?.length || 0;
+    return `Gallery · ${count} ${count === 1 ? "file" : "files"}`;
+  }
+  const labels: Record<string, string> = { image: "Image", pdf: "PDF", zip: "ZIP", file: "File", spotify: "Spotify", external_link: "Link" };
+  return labels[downloadable.type] || downloadable.type || "File";
+}
+
+function daySummary(day: CourseDay, rewards: number) {
+  const counts = new Map<string, number>();
+  day.items.forEach((item) => {
+    const label = itemKind(item).label.toLowerCase();
+    counts.set(label, (counts.get(label) || 0) + 1);
+  });
+  const parts = [...counts.entries()].map(([label, count]) => `${count} ${label}${count === 1 ? "" : "s"}`);
+  if (rewards) parts.push(`${rewards} ${rewards === 1 ? "reward" : "rewards"}`);
+  return parts.join(" · ") || "Empty";
+}
+
+function SyncStatus({ busy, message, syncing, lastError, savedAt }: {
+  busy: boolean;
+  message: string;
+  syncing: boolean;
+  lastError: string | null;
+  savedAt: number | null;
 }) {
+  if (busy) return <span className="sync sync-busy"><Loader2 size={14} className="animate-spin" /><span>{message}…</span></span>;
+  if (lastError) return <span className="sync sync-error" title={lastError}><CircleAlert size={14} /><span>Something went wrong</span></span>;
+  if (syncing) return <span className="sync sync-busy"><Loader2 size={14} className="animate-spin" /><span>Syncing</span></span>;
+  if (savedAt) return <span className="sync sync-ok"><CheckCircle2 size={14} /><span>All changes saved</span></span>;
+  return null;
+}
+
+function Menu({ id, label, icon, iconOnly = false, openMenu, setOpenMenu, children }: {
+  id: string;
+  label: string;
+  icon: ReactNode;
+  iconOnly?: boolean;
+  openMenu: string | null;
+  setOpenMenu: (id: string | null) => void;
+  children: ReactNode;
+}) {
+  const open = openMenu === id;
   return (
-    <section className={`course-section course-section-${introOnly ? "introduction" : "days"}`}>
-      {onAddDay && (
-        <div className="course-section-tools">
-          <button type="button" className="small-button" onClick={onAddDay}><Plus size={14} /> New day</button>
-          <span>{days.length} {days.length === 1 ? "group" : "groups"}</span>
-        </div>
+    <span className="menu" data-menu>
+      <button
+        type="button"
+        className={iconOnly ? "icon-button compact" : "small-button"}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-label={label}
+        title={iconOnly ? label : undefined}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpenMenu(open ? null : id);
+        }}
+      >
+        {icon}
+        {!iconOnly && <span>{label}</span>}
+      </button>
+      {open && (
+        <span className="menu-list" role="menu" onClick={() => setOpenMenu(null)}>
+          {children}
+        </span>
       )}
-      <div className="space-y-2">
-        {days.map((day) => {
-          const dayDownloadables = downloadablesForDay(downloadables, day.dayId);
-          return (
-          <details
-            key={day.dayId}
-            className="tree-node"
-            open={day.dayNumber <= 2 || day.dayId.startsWith("intro-")}
-            onDragOver={(event) => event.preventDefault()}
-            onDrop={(event) => {
-              const dragged = readDragData(event);
-              if (dragged?.kind === "day" && onReorderDay) {
-                event.preventDefault();
-                void onReorderDay(dragged.id, day.dayId);
-              }
-            }}
-          >
-            <summary className="tree-summary">
-              <span className="tree-leading">
-                {!introOnly && <span draggable onDragStart={(event) => setDragData(event, "day", day.dayId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag day"><GripVertical size={15} /></span>}
-                <span className="tree-chevron"><ChevronDown size={16} /></span>
-              </span>
-              <span className="min-w-0">
-                <span className="block truncate font-semibold">{day.title || day.dayId}</span>
-                <span className="block text-xs text-[#6b7280]">
-                  {day.dayId} · {day.items.length} items{dayDownloadables.length ? ` · ${dayDownloadables.length} rewards` : ""}
-                </span>
-              </span>
-              <span className="tree-actions">
-                <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onEditDay(day); }}><Pencil size={14} /> Day</button>
-                <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onAddVideo(day); }}><Video size={14} /> Video</button>
-                {!introOnly && <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onAddText(day); }}><FileText size={14} /> Text</button>}
-                {!introOnly && <button type="button" className="small-button" onClick={(event) => { event.preventDefault(); onAddDownloadable(day); }}><Download size={14} /> Reward</button>}
-                {(!introOnly || day.items.length > 0) && <button type="button" className="icon-button compact" onClick={(event) => { event.preventDefault(); onDeleteDay(day.dayId); }} title="Delete day"><Trash2 size={14} /></button>}
-              </span>
-            </summary>
-            <div className="tree-items">
-              {day.items.length === 0 && (
-                <div className="px-5 py-4 text-sm text-[#6b7280]">No intro video yet. Use Video to add the descriptive course video.</div>
-              )}
-              {sortItems(day.items).map((item) => (
-                <div
-                  key={item.itemId}
-                  className="tree-item"
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => {
-                    const dragged = readDragData(event);
-                    if (dragged?.kind === "item" && dragged.parentId === day.dayId) {
-                      event.preventDefault();
-                      void onReorderItem(day.dayId, dragged.id, item.itemId);
-                    }
-                  }}
-                >
-                  <span className="tree-item-leading">
-                    <span draggable onDragStart={(event) => setDragData(event, "item", item.itemId, day.dayId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag content"><GripVertical size={14} /></span>
-                    {item.type === "prompt" ? <FileText size={18} className="text-[#7b6f78]" /> : <Video size={18} className="text-[#e94b76]" />}
-                  </span>
-                  <button className="min-w-0 text-left" onClick={() => onEditItem(day, item)}>
-                    <div className="text-sm font-medium">{item.order}. {item.title}</div>
-                    <div className="text-xs text-[#6b7280]">{item.itemId} · {item.type} · {secondsToLabel(item.durationSeconds)}</div>
-                  </button>
-                  <button className="icon-button compact" onClick={() => onDeleteItem(day.dayId, item.itemId)} title="Delete item"><Trash2 size={14} /></button>
-                </div>
-              ))}
-              {dayDownloadables.map((downloadable) => (
-                <div
-                  key={downloadable.assetId}
-                  className="tree-item"
-                  onDragOver={(event) => event.preventDefault()}
-                  onDrop={(event) => {
-                    const dragged = readDragData(event);
-                    if (dragged?.kind === "reward" && dragged.parentId === day.dayId && onReorderDownloadable) {
-                      event.preventDefault();
-                      void onReorderDownloadable(day.dayId, dragged.id, downloadable.assetId);
-                    }
-                  }}
-                >
-                  <span className="tree-item-leading">
-                    <span draggable onDragStart={(event) => setDragData(event, "reward", downloadable.assetId, day.dayId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag reward"><GripVertical size={14} /></span>
-                    <Download size={18} className="text-[#e94b76]" />
-                  </span>
-                  <button className="min-w-0 text-left" onClick={() => onEditDownloadable(downloadable)}>
-                    <div className="text-sm font-medium">{downloadable.order}. {downloadable.title}</div>
-                    <div className="text-xs text-[#6b7280]">
-                      {downloadable.assetId} · reward · {downloadable.type}
-                      {downloadable.items?.length ? ` · ${downloadable.items.length} files` : ""}
-                    </div>
-                  </button>
-                  <button className="icon-button compact" onClick={() => onDeleteDownloadable(downloadable.assetId)} title="Delete reward"><Trash2 size={14} /></button>
-                </div>
-              ))}
-            </div>
-          </details>
-        )})}
-      </div>
-    </section>
+    </span>
   );
 }
 
-function DownloadablesSection({ downloadables, days, onEdit, onDelete }: {
-  downloadables: CourseDownloadable[];
-  days: CourseDay[];
+function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
+  return (
+    <label className="label">
+      {label}
+      {children}
+      {hint && <span className="hint">{hint}</span>}
+    </label>
+  );
+}
+
+function Advanced({ children }: { children: ReactNode }) {
+  return (
+    <details className="advanced">
+      <summary>Advanced</summary>
+      <div className="advanced-body">{children}</div>
+    </details>
+  );
+}
+
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="toggle">
+      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span>Needed to finish the day</span>
+    </label>
+  );
+}
+
+function DayField({ days, value, onChange }: { days: CourseDay[]; value: string; onChange: (dayId: string) => void }) {
+  const known = days.some((day) => day.dayId === value);
+  return (
+    <Field label="Day">
+      <select className="field" value={value} onChange={(e) => onChange(e.target.value)}>
+        {!known && <option value={value}>{value}</option>}
+        {days.map((day) => <option key={day.dayId} value={day.dayId}>{dayLabel(day)}</option>)}
+      </select>
+    </Field>
+  );
+}
+
+function MarkdownField({ label, value, onChange, placeholder }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+}) {
+  const [preview, setPreview] = useState(false);
+  return (
+    <div className="label">
+      <span className="field-label-row">
+        {label}
+        <span className="segmented" role="tablist">
+          <button type="button" role="tab" aria-selected={!preview} className={!preview ? "is-on" : ""} onClick={() => setPreview(false)}>Write</button>
+          <button type="button" role="tab" aria-selected={preview} className={preview ? "is-on" : ""} onClick={() => setPreview(true)}>Preview</button>
+        </span>
+      </span>
+      {preview ? (
+        <div className="md-preview">{value.trim() ? renderMarkdown(value) : <p className="hint">Nothing to preview yet.</p>}</div>
+      ) : (
+        <textarea className="field field-tall" value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder} />
+      )}
+      <span className="hint">## Heading · ###### Small note · **bold** · *italic* · [link](https://…)</span>
+    </div>
+  );
+}
+
+/** A preview close to how the app shows course text: blocks split by blank lines. */
+function renderMarkdown(text: string) {
+  return text
+    .trim()
+    .split(/\n\s*\n/)
+    .map((block, index) => {
+      const trimmed = block.trim();
+      if (trimmed.startsWith("######")) return <p key={index} className="md-note">{renderInline(trimmed.replace(/^#+\s*/, "").toUpperCase())}</p>;
+      if (trimmed.startsWith("#")) return <h4 key={index} className="md-heading">{renderInline(trimmed.replace(/^#+\s*/, ""))}</h4>;
+      return <p key={index}>{renderInline(trimmed)}</p>;
+    });
+}
+
+function renderInline(text: string): ReactNode[] {
+  const parts = text.split(/(\[[^\]]+\]\([^)]+\)|\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|\*[^*]+\*|\n)/g);
+  return parts.map((part, index) => {
+    if (part === "\n") return <br key={index} />;
+    const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+    if (link) return <a key={index} href={link[2]} target="_blank" rel="noreferrer">{link[1]}</a>;
+    if (/^\*\*\*[^*]+\*\*\*$/.test(part)) return <strong key={index}><em>{part.slice(3, -3)}</em></strong>;
+    if (/^\*\*[^*]+\*\*$/.test(part)) return <strong key={index}>{part.slice(2, -2)}</strong>;
+    if (/^\*[^*]+\*$/.test(part)) return <em key={index}>{part.slice(1, -1)}</em>;
+    return part;
+  });
+}
+
+type DayCardProps = {
+  day: CourseDay;
+  rewards: CourseDownloadable[];
+  intro?: boolean;
+  defaultOpen?: boolean;
+  openMenu: string | null;
+  setOpenMenu: (id: string | null) => void;
+  activeKey: string;
+  onEditDay: (day: CourseDay) => void;
+  onDeleteDay: (dayId: string) => void;
+  onAddVideo: (day: CourseDay) => void;
+  onAddPrompt: (day: CourseDay) => void;
+  onAddInstruction: (day: CourseDay) => void;
+  onAddReward: (day: CourseDay) => void;
+  onEditItem: (day: CourseDay, item: CourseDayItem) => void;
+  onDeleteItem: (dayId: string, itemId: string) => void;
+  onEditReward: (downloadable: CourseDownloadable) => void;
+  onDeleteReward: (assetId: string) => void;
+  onReorderDay?: (sourceId: string, targetId: string) => Promise<void>;
+  onReorderItem: (dayId: string, sourceId: string, targetId: string) => Promise<void>;
+  onReorderReward?: (dayId: string, sourceId: string, targetId: string) => Promise<void>;
+};
+
+function DayCard({ day, rewards, intro = false, defaultOpen = false, openMenu, setOpenMenu, activeKey, onEditDay, onDeleteDay, onAddVideo, onAddPrompt, onAddInstruction, onAddReward, onEditItem, onDeleteItem, onEditReward, onDeleteReward, onReorderDay, onReorderItem, onReorderReward }: DayCardProps) {
+  const prompt = day.items.find((item) => item.type === "prompt");
+  const title = day.title?.trim() || (intro ? "Introduction" : `Day ${day.dayNumber}`);
+  const showNumber = !intro && title.toLowerCase() !== `day ${day.dayNumber}`;
+  return (
+    <details
+      className={`tree-node day-card ${activeKey === `day:${day.dayId}` ? "is-active" : ""}`}
+      open={defaultOpen}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        const dragged = readDragData(event);
+        if (dragged?.kind === "day" && onReorderDay) {
+          event.preventDefault();
+          void onReorderDay(dragged.id, day.dayId);
+        }
+      }}
+    >
+      <summary className="tree-summary">
+        {!intro && onReorderDay ? (
+          <span draggable onDragStart={(event) => setDragData(event, "day", day.dayId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag to reorder days"><GripVertical size={15} /></span>
+        ) : <span />}
+        <span className="tree-chevron"><ChevronDown size={16} /></span>
+        <span className="day-title-wrap">
+          {showNumber && <span className="day-number">Day {day.dayNumber}</span>}
+          <span className="day-title">{title}</span>
+          <span className="day-meta">{daySummary(day, rewards.length)}</span>
+        </span>
+        <span className="day-actions" onClick={(event) => event.preventDefault()}>
+          {intro ? (
+            <button type="button" className="small-button" onClick={() => onAddVideo(day)}><Plus size={14} /> Video</button>
+          ) : (
+            <Menu id={`add-${day.dayId}`} label="Add" icon={<Plus size={14} />} openMenu={openMenu} setOpenMenu={setOpenMenu}>
+              <button type="button" role="menuitem" className="menu-item" onClick={() => onAddVideo(day)}><span className="kind-icon kind-video"><Video size={14} /></span> Video</button>
+              <button type="button" role="menuitem" className="menu-item" onClick={() => (prompt ? onEditItem(day, prompt) : onAddPrompt(day))}><span className="kind-icon kind-prompt"><PenLine size={14} /></span> {prompt ? "Edit prompt" : "Prompt"}</button>
+              <button type="button" role="menuitem" className="menu-item" onClick={() => onAddInstruction(day)}><span className="kind-icon kind-instruction"><BookOpen size={14} /></span> Instruction</button>
+              <button type="button" role="menuitem" className="menu-item" onClick={() => onAddReward(day)}><span className="kind-icon kind-reward"><Gift size={14} /></span> Reward</button>
+            </Menu>
+          )}
+          <Menu id={`day-${day.dayId}`} label="Day options" iconOnly icon={<Ellipsis size={16} />} openMenu={openMenu} setOpenMenu={setOpenMenu}>
+            <button type="button" role="menuitem" className="menu-item" onClick={() => onEditDay(day)}><Pencil size={15} /> Edit day</button>
+            {(!intro || day.items.length > 0) && (
+              <button type="button" role="menuitem" className="menu-item menu-item-danger" onClick={() => onDeleteDay(day.dayId)}><Trash2 size={15} /> Delete day</button>
+            )}
+          </Menu>
+        </span>
+      </summary>
+      <div className="tree-items">
+        {day.items.length === 0 && rewards.length === 0 && (
+          <p className="day-empty">{intro ? "No intro video yet." : "Nothing here yet. Use Add for a video, prompt, instruction or reward."}</p>
+        )}
+        {sortItems(day.items).map((item) => {
+          const kind = itemKind(item);
+          const active = activeKey === `${day.dayId}:${item.itemId}` || (item.type === "prompt" && activeKey === `${day.dayId}:prompt`);
+          return (
+            <div
+              key={item.itemId}
+              className={`tree-item ${active ? "is-active" : ""}`}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                const dragged = readDragData(event);
+                if (dragged?.kind === "item" && dragged.parentId === day.dayId) {
+                  event.preventDefault();
+                  void onReorderItem(day.dayId, dragged.id, item.itemId);
+                }
+              }}
+            >
+              <span draggable onDragStart={(event) => setDragData(event, "item", item.itemId, day.dayId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag to reorder"><GripVertical size={14} /></span>
+              <span className={`kind-icon kind-${kind.kind}`}>{kind.icon(15)}</span>
+              <button type="button" className="row-main" onClick={() => onEditItem(day, item)}>
+                <span className="row-title">{item.title || "Untitled"}</span>
+                <span className="row-meta">
+                  <span className={`kind-chip kind-${kind.kind}`}>{kind.label}</span>
+                  {item.type === "video" && (item.durationSeconds || 0) > 0 && <span>{secondsToLabel(item.durationSeconds)}</span>}
+                  {!item.requiredForCompletion && <span>Optional</span>}
+                </span>
+              </button>
+              <button type="button" className="icon-button compact ghost row-delete" onClick={() => onDeleteItem(day.dayId, item.itemId)} title="Delete" aria-label={`Delete ${item.title}`}><Trash2 size={14} /></button>
+            </div>
+          );
+        })}
+        {rewards.map((downloadable) => (
+          <RewardRow
+            key={downloadable.assetId}
+            downloadable={downloadable}
+            active={activeKey === `reward:${downloadable.assetId}`}
+            onEdit={onEditReward}
+            onDelete={onDeleteReward}
+            onDrop={onReorderReward ? (sourceId) => void onReorderReward(day.dayId, sourceId, downloadable.assetId) : undefined}
+            dayId={day.dayId}
+          />
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function RewardRow({ downloadable, active, onEdit, onDelete, onDrop, dayId = "" }: {
+  downloadable: CourseDownloadable;
+  active: boolean;
   onEdit: (downloadable: CourseDownloadable) => void;
   onDelete: (assetId: string) => void;
+  onDrop?: (sourceId: string) => void;
+  dayId?: string;
 }) {
-  const sortedDownloadables = [...downloadables].sort((a, b) => {
-    const rankDelta = downloadableUnlockRank(a.unlockAfter, days) - downloadableUnlockRank(b.unlockAfter, days);
-    return rankDelta || a.order - b.order || a.assetId.localeCompare(b.assetId);
-  });
-
   return (
-    <section className="course-section course-section-rewards">
-      <div className="tree-node">
-        {sortedDownloadables.length === 0 ? (
-          <div className="p-4 text-sm text-[#6b7280]">No rewards added yet.</div>
-        ) : (
-          <div className="tree-items border-t-0">
-            {sortedDownloadables.map((downloadable) => (
-              <div key={downloadable.assetId} className="tree-item">
-                <Download size={18} className="text-[#e94b76]" />
-                <button className="min-w-0 text-left" onClick={() => onEdit(downloadable)}>
-                  <div className="text-sm font-medium">{downloadable.order}. {downloadable.title}</div>
-                  <div className="text-xs text-[#6b7280]">
-                    {downloadableUnlockLabel(downloadable.unlockAfter, days)} · {downloadable.type}
-                    {downloadable.items?.length ? ` · ${downloadable.items.length} files` : ""}
-                  </div>
-                </button>
-                <button className="icon-button compact" onClick={() => onDelete(downloadable.assetId)} title="Delete reward"><Trash2 size={14} /></button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </section>
+    <div
+      className={`tree-item ${active ? "is-active" : ""}`}
+      onDragOver={(event) => event.preventDefault()}
+      onDrop={(event) => {
+        const dragged = readDragData(event);
+        if (onDrop && dragged?.kind === "reward" && dragged.parentId === dayId) {
+          event.preventDefault();
+          onDrop(dragged.id);
+        }
+      }}
+    >
+      {onDrop ? (
+        <span draggable onDragStart={(event) => setDragData(event, "reward", downloadable.assetId, dayId)} onDragEnd={clearDragStyle} className="drag-handle" title="Drag to reorder"><GripVertical size={14} /></span>
+      ) : <span />}
+      <span className="kind-icon kind-reward"><Gift size={15} /></span>
+      <button type="button" className="row-main" onClick={() => onEdit(downloadable)}>
+        <span className="row-title">{downloadable.title || "Untitled reward"}</span>
+        <span className="row-meta">
+          <span className="kind-chip kind-reward">Reward</span>
+          <span>{rewardTypeLabel(downloadable)}</span>
+        </span>
+      </button>
+      <button type="button" className="icon-button compact ghost row-delete" onClick={() => onDelete(downloadable.assetId)} title="Delete" aria-label={`Delete ${downloadable.title}`}><Trash2 size={14} /></button>
+    </div>
   );
 }

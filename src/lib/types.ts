@@ -1,6 +1,7 @@
 export type CourseDayItem = {
   itemId: string;
-  type: "video" | "prompt" | string;
+  // An instruction is read in the app (no writing); its markdown text is its description.
+  type: "video" | "prompt" | "instruction" | string;
   order: number;
   title: string;
   description?: string;

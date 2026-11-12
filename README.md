@@ -6,7 +6,7 @@ Internal course operations tool for the Gratitude backend.
 
 - Course metadata in DynamoDB
 - Days in `days[]`
-- Video and prompt/text items in `days[].items[]`
+- Video, prompt and instruction items in `days[].items[]` (an instruction is read in the app, with no writing; its markdown text is the item's `description`, saved with `PUT /v1/courses/{courseId}/items`)
 - Bunny Stream uploads into the selected course collection
 
 ## Access model
